@@ -29,7 +29,7 @@ class MaidataMeta:
     title: str
     artist: str = ""
     first: float = 0.0      # seconds from audio start to bar 1 beat 1
-    designer: str = "chartgen"
+    designer: str = "AstroDX autocharter"
     extra: dict[str, str] = field(default_factory=dict)  # any other &key=value
 
 

@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = Path(os.environ.get("CHARTGEN_DATA", ROOT / "data"))
+DATA_DIR = Path(os.environ.get("ASTRODX_AUTOCHARTER_DATA", ROOT / "data"))
 PROJECTS_DIR = DATA_DIR / "projects"
 EXPORTS_DIR = DATA_DIR / "exports"
 

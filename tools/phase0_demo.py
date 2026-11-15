@@ -54,7 +54,7 @@ def main():
     ap.add_argument("--bpm", type=float, required=True)
     ap.add_argument("--first", type=float, required=True,
                     help="seconds from audio start to a downbeat")
-    ap.add_argument("--title", default="chartgen phase0")
+    ap.add_argument("--title", default="AstroDX autocharter phase0")
     ap.add_argument("--artist", default="")
     ap.add_argument("--jacket", default=None, help="optional .jpg")
     ap.add_argument("--slot", type=int, default=5, help="5 = Master")
