@@ -83,7 +83,7 @@ def test_maidata_and_length_check():
     text = build_maidata(MaidataMeta("A & B", "x", first=0.5),
                          [DifficultyChart(5, "14+", c)])
     assert "&lv_5=14+" in text and "&inote_5=(120){4}1,,,,\nE" in text
-    assert "&title=A & B" in text
+    assert "&title=A ＆ B" in text
     with pytest.raises(ValueError):
         build_maidata(MaidataMeta("t", first=10), [DifficultyChart(5, "1", c)],
                       audio_duration=5)
