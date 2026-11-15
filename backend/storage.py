@@ -1,8 +1,11 @@
 """Project folders: data/projects/<id>/
 
     source.<ext>     original upload (kept for re-processing)
-    track.mp3        audio for AstroDX (mp3 uploads copied untouched)
-    analysis.wav     mono 22050 Hz decode of track.mp3, for analysis
+    track.mp3        audio for AstroDX and the music bar
+                     (mp3 uploads copied untouched, others converted once;
+                     the original upload is not kept)
+    analysis.wav     mono 22050 Hz decode of track.mp3. A cache only:
+                     safe to delete, rebuilt by ensure_analysis_wav()
     peaks.bin        waveform peaks for the music bar
     bg.jpg|bg.png    jacket (uploaded > embedded cover > none)
     project.json     metadata (title, artist, duration, timing...)
@@ -87,9 +90,8 @@ def create_project(audio_path: Path, original_name: str | None = None,
     d = project_dir(pid)
     d.mkdir(parents=True)
     try:
-        src = d / f"source{ext}"
-        shutil.copyfile(audio_path, src)
-
+        # read tags/cover straight from the upload; it isn't copied into the project
+        src = audio_path
         loader.make_track_mp3(src, d / "track.mp3")
         loader.make_analysis_wav(d / "track.mp3", d / "analysis.wav")
         samples, sr = loader.read_wav(d / "analysis.wav")
@@ -121,6 +123,16 @@ def create_project(audio_path: Path, original_name: str | None = None,
     except Exception:
         shutil.rmtree(d, ignore_errors=True)
         raise
+
+
+def ensure_analysis_wav(pid: str) -> Path:
+    """Return analysis.wav for a project, rebuilding it from track.mp3 if it
+    was deleted."""
+    d = project_dir(pid)
+    wav = d / "analysis.wav"
+    if not wav.is_file():
+        loader.make_analysis_wav(d / "track.mp3", wav)
+    return wav
 
 
 def delete_project(pid: str) -> None:

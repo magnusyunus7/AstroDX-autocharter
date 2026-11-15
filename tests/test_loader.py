@@ -40,6 +40,7 @@ def test_mp3_copied_untouched(tmp_path):
     assert abs(p.duration - 5.0) < 0.1
     assert p.title == "a"
     assert (d / "peaks.bin").stat().st_size > 0
+    assert not list(d.glob("source*"))  # original upload isn't duplicated
 
 
 def test_wav_converted_and_tags(tmp_path):
@@ -111,3 +112,11 @@ def test_title_from_sibling_maidata_or_folder(tmp_path):
     (lvl / "maidata.txt").write_text("&title=RONDØ\n&artist=Ashrount\n&first=0\n", encoding="utf-8")
     p = storage.create_project(src)
     assert p.title == "RONDØ" and p.artist == "Ashrount"  # from maidata.txt
+
+
+def test_analysis_wav_is_rebuildable(tmp_path):
+    p = storage.create_project(tone(tmp_path / "r.mp3"))
+    wav = storage.project_dir(p.id) / "analysis.wav"
+    before = wav.read_bytes()
+    wav.unlink()
+    assert storage.ensure_analysis_wav(p.id).read_bytes() == before
