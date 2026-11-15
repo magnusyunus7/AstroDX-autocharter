@@ -4,6 +4,6 @@ python-multipart
 pydantic>=2
 numpy
 librosa
-soundfile
 mutagen
 pytest
+httpx2
