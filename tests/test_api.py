@@ -85,3 +85,14 @@ def test_frontend_served(client):
     assert r.status_code == 200 and "AstroDX autocharter" in r.text
     assert r.headers["cache-control"] == "no-store"
     assert client.get("/js/main.js").status_code == 200
+
+
+def test_timing_save_and_validate(client, mp3):
+    pid = upload(client, mp3).json()["id"]
+    assert client.get(f"/api/projects/{pid}").json()["timing"] is None
+    r = client.put(f"/api/projects/{pid}/timing", json={"bpm": 314, "first": 0.1234})
+    assert r.status_code == 200
+    t = client.get(f"/api/projects/{pid}").json()["timing"]
+    assert t == {"bpm": 314.0, "first": 0.1234, "confirmed": True}
+    for bad in ({"bpm": 0, "first": 0}, {"bpm": 120, "first": -1}, {"bpm": 120, "first": 99}):
+        assert client.put(f"/api/projects/{pid}/timing", json=bad).status_code in (400, 422)

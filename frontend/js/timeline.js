@@ -25,6 +25,7 @@ export class Timeline {
     this.playing = false;
     this.markers = [];           // [{t, color, label}]
     this.overlays = [];          // [(g, view) => void]
+    this.onShiftDrag = null;     // (dtSec, "start" | "move") => void  (Shift+drag moves the grid)
     this._ovCache = null;
     this._bind();
     new ResizeObserver(() => { this._ovCache = null; this.draw(); }).observe(this.wave);
@@ -154,7 +155,7 @@ export class Timeline {
       g.strokeStyle = m.color; g.setLineDash([4, 3]);
       g.beginPath(); g.moveTo(x, rulerH); g.lineTo(x, h); g.stroke();
       g.setLineDash([]);
-      if (m.label) { g.fillStyle = m.color; g.fillText(m.label, x + 3, rulerH + 3); }
+      if (m.label) { g.fillStyle = m.color; g.fillText(m.label, x + 3, h - 14); }
     }
 
     // playhead
@@ -215,13 +216,17 @@ export class Timeline {
     let drag = null;
     wv.addEventListener("pointerdown", (e) => {
       wv.setPointerCapture(e.pointerId);
-      drag = { x: e.offsetX, start: this.start, moved: false };
+      const grid = e.shiftKey && this.onShiftDrag;
+      drag = { x: e.offsetX, start: this.start, moved: false, grid };
+      if (grid) this.onShiftDrag(0, "start");
     });
     wv.addEventListener("pointermove", (e) => {
       if (!drag) return;
       const dx = e.offsetX - drag.x;
       if (Math.abs(dx) > 3) { drag.moved = true; wv.classList.add("dragging"); }
-      if (drag.moved) { this.start = drag.start - dx / this.pxPerSec; this._clamp(); this.draw(); }
+      if (!drag.moved) return;
+      if (drag.grid) this.onShiftDrag(dx / this.pxPerSec, "move");
+      else { this.start = drag.start - dx / this.pxPerSec; this._clamp(); this.draw(); }
     });
     wv.addEventListener("pointerup", (e) => {
       if (drag && !drag.moved) this.onSeek(Math.max(0, Math.min(this.duration, this.xToTime(e.offsetX))));

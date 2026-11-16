@@ -23,6 +23,7 @@ export const api = {
   createProject: async (formData) => (await req("POST", "/api/projects", formData)).json(),
   patchProject: async (id, fields) => (await req("PATCH", `/api/projects/${id}`, fields)).json(),
   deleteProject: async (id) => (await req("DELETE", `/api/projects/${id}`)).json(),
+  putTiming: async (id, timing) => (await req("PUT", `/api/projects/${id}/timing`, timing)).json(),
 
   trackUrl: (id) => `/api/projects/${id}/track.mp3`,
   jacketUrl: (id) => `/api/projects/${id}/jacket`,

@@ -1,7 +1,7 @@
 // Tiny hash router:  #/  -> home,  #/p/<id>  -> project
 
 import { initHome, showHome } from "./home.js";
-import { initProject, showProject, leaveProject } from "./project.js";
+import { initProject, showProject, leaveProject, hasUnsavedTiming } from "./project.js";
 
 const views = {
   home: document.getElementById("view-home"),
@@ -32,6 +32,10 @@ async function route() {
     location.hash = "#/";
   }
 }
+
+window.addEventListener("beforeunload", (e) => {
+  if (hasUnsavedTiming()) { e.preventDefault(); e.returnValue = ""; }
+});
 
 initHome();
 initProject();

@@ -4,9 +4,11 @@ import { api, fmtTime } from "./api.js";
 import { Player } from "./player.js";
 import { Timeline } from "./timeline.js";
 import { measureDecoderOffset } from "./decodercheck.js";
+import { TimingControls } from "./timing.js";
 
 const player = new Player();
 let timeline = null;
+let timing = null;
 let current = null;   // project
 let raf = 0;
 
@@ -15,6 +17,7 @@ export function initProject() {
     getTime: () => player.time,
     onSeek: (t) => { player.seek(t); timeline.draw(); },
   });
+  timing = new TimingControls(player, timeline);
   player.onstate = () => {
     document.getElementById("btn-play").textContent = player.playing ? "❚❚" : "▶";
     timeline.playing = player.playing;
@@ -39,7 +42,9 @@ export function initProject() {
 
   document.addEventListener("keydown", (e) => {
     if (document.getElementById("view-project").hidden) return;
-    if (e.target.tagName === "INPUT" && e.target.type === "text") return;
+    const tag = e.target.tagName;
+    if (tag === "SELECT" || (tag === "INPUT" && !["checkbox", "range", "button"].includes(e.target.type))) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
     const step = e.shiftKey ? 0.1 : 1;
     if (e.code === "Space") { e.preventDefault(); player.toggle(); }
     else if (e.key === "ArrowLeft") { e.preventDefault(); player.seek(player.time - step); timeline.draw(); }
@@ -76,8 +81,9 @@ export async function showProject(id) {
     `id ${current.id} · source ${current.source_name} · ${current.duration.toFixed(3)} s`;
 
   const [meta, peaks, bytes] = await Promise.all([api.peaksMeta(id), api.peaks(id), api.trackBytes(id)]);
-  timeline.markers = [{ t: meta.first_sound, color: "#ff5252", label: "first sound" }];
+  timeline.markers = [{ t: meta.first_sound, color: "#ffab40", label: "first sound" }];
   timeline.setAudio(peaks, meta, current.duration);
+  timing.load(current, meta);
 
   const buf = await player.load(bytes);
   player.setVolume(+document.getElementById("vol").value);
@@ -100,4 +106,9 @@ export async function showProject(id) {
 
 export function leaveProject() {
   player.pause();
+}
+
+/** True when the user has timing edits that aren't confirmed yet. */
+export function hasUnsavedTiming() {
+  return !!timing?.project && timing.dirty && !document.getElementById("view-project").hidden;
 }

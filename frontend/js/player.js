@@ -19,6 +19,8 @@ export class Player {
     this.startPos = 0;       // buffer position (s) at that moment
     this.pausedPos = 0;      // buffer position while paused
     this.decoderOffset = 0;  // browser buffer time = analysis time + decoderOffset
+    this.rate = 1;           // playback speed (changes pitch too; fine for timing work)
+    this.epoch = 0;          // bumps on every start/stop/seek, so the metronome can resync
     this.onstate = () => {};
   }
 
@@ -39,8 +41,30 @@ export class Player {
   _bufferPos() {
     if (!this.playing) return this.pausedPos;
     const lat = (this.ctx.outputLatency || 0) + (this.ctx.baseLatency || 0);
-    const p = this.startPos + (this.ctx.currentTime - this.startCtxTime) - lat;
+    const p = this.startPos + (this.ctx.currentTime - this.startCtxTime - lat) * this.rate;
     return Math.max(this.startPos, p);
+  }
+
+  /** AudioContext time at which analysis time `t` is (or will be) output by
+   *  the current source. Only meaningful while playing. Used to schedule
+   *  metronome clicks on the exact same clock as the music. */
+  ctxTimeAt(t) {
+    return this.startCtxTime + (t + this.decoderOffset - this.startPos) / this.rate;
+  }
+
+  /** Analysis time of the audio being *scheduled* right now (no latency
+   *  compensation): the metronome's reference point. */
+  get scheduledTime() {
+    if (!this.playing) return this.time;
+    return this.startPos + (this.ctx.currentTime - this.startCtxTime) * this.rate - this.decoderOffset;
+  }
+
+  setRate(r) {
+    if (r === this.rate) return;
+    const t = this.time;
+    this.rate = r;
+    if (this.playing) this.play(t);
+    else this.onstate();
   }
 
   /** Current time in analysis seconds. */
@@ -53,6 +77,7 @@ export class Player {
     this._stopSource();
     const src = this.ctx.createBufferSource();
     src.buffer = this.buffer;
+    src.playbackRate.value = this.rate;
     src.connect(this.gain);
     const clamped = Math.min(Math.max(pos, 0), this.buffer.duration);
     src.start(0, clamped);
@@ -63,6 +88,7 @@ export class Player {
     this.startPos = clamped;
     this.startCtxTime = this.ctx.currentTime;
     this.playing = true;
+    this.epoch++;
     this.onstate();
   }
 
@@ -71,6 +97,7 @@ export class Player {
     this.pausedPos = this._bufferPos();
     this._stopSource();
     this.playing = false;
+    this.epoch++;
     this.onstate();
   }
 
@@ -84,7 +111,7 @@ export class Player {
 
   setVolume(v) { if (this.gain) this.gain.gain.value = v; }
 
-  stop() { this._stopSource(); this.playing = false; this.pausedPos = 0; }
+  stop() { this._stopSource(); this.playing = false; this.pausedPos = 0; this.epoch++; }
 
   _stopSource() {
     if (this.source) {
