@@ -43,6 +43,14 @@ def test_mp3_copied_untouched(tmp_path):
     assert not list(d.glob("source*"))  # original upload isn't duplicated
 
 
+def test_analysis_wav_is_rebuildable(tmp_path):
+    p = storage.create_project(tone(tmp_path / "r.mp3"))
+    wav = storage.project_dir(p.id) / "analysis.wav"
+    before = wav.read_bytes()
+    wav.unlink()
+    assert storage.ensure_analysis_wav(p.id).read_bytes() == before
+
+
 def test_wav_converted_and_tags(tmp_path):
     src = tmp_path / "b.flac"
     ff("-f", "lavfi", "-i", "sine=frequency=440:duration=3",
@@ -53,16 +61,29 @@ def test_wav_converted_and_tags(tmp_path):
     assert p.title == "My Song" and p.artist == "Someone"
 
 
-def test_embedded_cover_extracted(tmp_path):
+def _embed_cover(mp3, data, mime="image/png"):
     from mutagen.id3 import APIC, ID3
-    src = tone(tmp_path / "c.mp3")
-    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
     tags = ID3()
-    tags.add(APIC(encoding=3, mime="image/png", type=3, desc="cover", data=png))
-    tags.save(str(src))
+    tags.add(APIC(encoding=3, mime=mime, type=3, desc="cover", data=data))
+    tags.save(str(mp3))
+
+
+def test_embedded_cover_extracted(tmp_path):
+    src = tone(tmp_path / "c.mp3")
+    png = tmp_path / "real.png"
+    ff("-f", "lavfi", "-i", "color=c=red:s=32x32", "-frames:v", "1", str(png))
+    _embed_cover(src, png.read_bytes())
     p = storage.create_project(src)
     assert p.jacket == "bg.png"
-    assert (storage.project_dir(p.id) / "bg.png").read_bytes() == png
+    assert (storage.project_dir(p.id) / "bg.png").read_bytes() == png.read_bytes()
+
+
+def test_broken_embedded_cover_ignored(tmp_path):
+    src = tone(tmp_path / "c2.mp3")
+    _embed_cover(src, b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)   # header only: corrupt
+    p = storage.create_project(src)
+    assert p.jacket is None
+    assert not (storage.project_dir(p.id) / "bg.png").exists()
 
 
 def test_uploaded_jacket_wins(tmp_path):
@@ -112,11 +133,3 @@ def test_title_from_sibling_maidata_or_folder(tmp_path):
     (lvl / "maidata.txt").write_text("&title=RONDØ\n&artist=Ashrount\n&first=0\n", encoding="utf-8")
     p = storage.create_project(src)
     assert p.title == "RONDØ" and p.artist == "Ashrount"  # from maidata.txt
-
-
-def test_analysis_wav_is_rebuildable(tmp_path):
-    p = storage.create_project(tone(tmp_path / "r.mp3"))
-    wav = storage.project_dir(p.id) / "analysis.wav"
-    before = wav.read_bytes()
-    wav.unlink()
-    assert storage.ensure_analysis_wav(p.id).read_bytes() == before

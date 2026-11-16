@@ -58,7 +58,7 @@ export class TimingControls {
     const pid = this.project.id;
     const btn = $("t-detect");
     btn.disabled = true;
-    $("detect-info").textContent = "Detecting… (a few seconds)";
+    $("detect-info").textContent = "Detecting… (about 15 s for a 3-minute song, only the first time)";
     try {
       const d = await api.detectTiming(pid, force);
       if (this.project?.id !== pid) return;   // user switched projects meanwhile

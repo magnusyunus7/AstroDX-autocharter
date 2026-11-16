@@ -122,6 +122,16 @@ def extract_cover(path: Path) -> tuple[bytes, str] | None:
     return None
 
 
+def image_ok(path: Path) -> bool:
+    """True if ffmpeg can decode the image (catches corrupted embedded art)."""
+    try:
+        r = subprocess.run([config.FFMPEG, "-v", "error", "-i", str(path), "-f", "null", "-"],
+                           capture_output=True, text=True)
+    except FileNotFoundError:
+        return True  # can't check without ffmpeg; keep it
+    return r.returncode == 0 and not r.stderr.strip()
+
+
 def save_jacket(src: Path | None, cover: tuple[bytes, str] | None, out_dir: Path) -> str | None:
     """Write bg.jpg / bg.png into out_dir. An uploaded image wins over embedded
     art. Other formats (webp, bmp) are converted to png. Returns the filename."""
@@ -139,5 +149,8 @@ def save_jacket(src: Path | None, cover: tuple[bytes, str] | None, out_dir: Path
         data, ext = cover
         name = "bg" + ext
         (out_dir / name).write_bytes(data)
+        if not image_ok(out_dir / name):   # broken embedded art: no jacket
+            (out_dir / name).unlink()
+            return None
         return name
     return None

@@ -12,7 +12,8 @@ difficulty) and &first, runs detection on track.mp3, and reports:
   bar     whether detected beat 1 matches the chart's bar grid (bars counted
           from &first). Informative only: charts don't always put their bar
           lines on the musical downbeat.
-Charts with BPM changes are listed but skipped.
+An empty lead-in at another BPM (e.g. "(172){1}," then constant "(57.333)")
+is understood. Charts whose notes change BPM are listed but skipped.
 """
 from __future__ import annotations
 
@@ -25,21 +26,60 @@ from pathlib import Path
 from backend.audio import loader, tempo
 
 
+def scan_simai(body: str):
+    """Walk a simai note string up to the first note. Returns
+    (grid_start, bpm_at_first_note, later_bpms): when the BPM the notes use
+    was last set (an empty lead-in can use its own BPM, e.g. "(172){1},"
+    before "(57.333)"; the real grid starts where that BPM begins), that BPM,
+    and every BPM marker after the first note."""
+    i, n = 0, len(body)
+    bpm, div, t, grid_start = None, 4.0, 0.0, 0.0
+    while i < n:
+        c = body[i]
+        if c == "(":
+            j = body.index(")", i)
+            new = float(body[i + 1:j]); i = j + 1
+            if bpm is None or abs(new - bpm) > 1e-6:
+                grid_start = t
+            bpm = new
+        elif c == "{":
+            j = body.index("}", i)
+            v = body[i + 1:j]
+            if v.startswith("#"):          # {#sec}: each comma lasts sec seconds
+                div = -float(v[1:])
+            else:
+                div = float(v)
+            i = j + 1
+        elif c == ",":
+            if bpm is None:
+                raise ValueError("comma before any BPM")
+            t += -div if div < 0 else 240.0 / bpm / div
+            i += 1
+        elif c.isspace():
+            i += 1
+        else:
+            break                          # first note (or E)
+    later = [float(x) for x in re.findall(r"\(([\d.]+)\)", body[i:])]
+    return grid_start, bpm, later
+
+
 def read_chart_timing(maidata: Path) -> dict:
     text = maidata.read_text(encoding="utf-8", errors="replace")
     first = re.search(r"^&first=([-\d.]+)", text, re.M)
+    first = float(first.group(1)) if first else 0.0
     notes = dict(re.findall(r"^&inote_(\d+)=(.*?)(?=^&|\Z)", text, re.M | re.S))
     if not notes:
         raise ValueError("no &inote_N found")
     body = notes[max(notes, key=int)]
-    bpms = re.findall(r"\(([\d.]+)\)", body)
-    if not bpms:
+    lead, bpm, later = scan_simai(body)
+    if bpm is None:
         wb = re.search(r"^&wholebpm=([\d.]+)", text, re.M)
-        bpms = [wb.group(1)] if wb else []
-    if not bpms:
-        raise ValueError("no BPM found")
-    return {"bpm": float(bpms[0]), "first": float(first.group(1)) if first else 0.0,
-            "variable": len({round(float(b), 3) for b in bpms}) > 1}
+        if not wb:
+            raise ValueError("no BPM found")
+        bpm = float(wb.group(1))
+    variable = any(abs(b - bpm) > 1e-3 for b in later)
+    # the notes' beat grid starts after the lead-in
+    return {"bpm": bpm, "first": first + lead, "variable": variable, "lead": lead}
 
 
 def relation(det: float, true: float) -> str:
@@ -56,10 +96,10 @@ def main():
     ap.add_argument("folder")
     ap.add_argument("--debug", action="store_true",
                     help="also print each BPM candidate's octave ratios (for tuning)")
-    ap.add_argument("--separate", action="store_true",
-                    help="split drums from melody first (slower; compare against the default)")
+    ap.add_argument("--fast", action="store_true",
+                    help="skip drum/melody separation (~4x faster, slightly less accurate)")
     a = ap.parse_args()
-    print(f"mode: {'separate (HPSS)' if a.separate else 'fast (default)'}\n")
+    print(f"mode: {'fast (no separation)' if a.fast else 'separate (default)'}\n")
     levels = sorted(p.parent for p in Path(a.folder).rglob("maidata.txt"))
     rows, stats = [], {"exact": 0, "octave": 0, "wrong": 0, "phase": [], "bar": 0}
     print(f"{'level':30} {'chart bpm':>10} {'detected':>10} {'bpm':>6} {'phase ms':>9} {'bar':>4}  conf      time")
@@ -82,7 +122,7 @@ def main():
             loader.make_analysis_wav(audio, wav)
             y, sr = loader.read_wav(wav)
         t0 = time.time()
-        r = tempo.detect(y, sr, separate=a.separate)
+        r = tempo.detect(y, sr, separate=not a.fast)
         dt = time.time() - t0
 
         rel = relation(r.bpm, truth["bpm"])

@@ -22,15 +22,20 @@ from fractions import Fraction
 
 import numpy as np
 
-VERSION = 3               # bump when results change, so cached detections are redone
+VERSION = 4               # bump when results change, so cached detections are redone
 HOP = 64                  # analysis hop (samples) -> 2.9 ms at 22050 Hz
 COARSE = 4                # BPM search runs on a 4x coarser curve first
 TOP_K = 12                # ...then re-scores this many best BPMs at full resolution
-BPM_MIN, BPM_MAX = 60.0, 420.0
+BPM_MIN, BPM_MAX = 50.0, 420.0
 FRACTIONS = (Fraction(0), Fraction(1, 3), Fraction(1, 2), Fraction(2, 3))
-# Onset curves peak slightly before/after the true attack. Measured on
-# synthetic drums with known timing (tools/make_test_song.py); see tests.
-ONSET_BIAS_SEC = -0.006
+# Onset curves peak slightly before/after the true attack. Calibrated on real
+# charts (tools/eval_timing.py: three songs by different charters agreed on a
+# +4.5 ms lag vs the -6 ms our synthetic drums suggested; real attacks are softer).
+ONSET_BIAS_SEC = -0.0015
+# Among octave candidates (x2, /2), prefer the fastest at or below this. On real
+# charts, songs with gallops / 8th-note kicks fully hit the 2x grid too; every
+# 2x mistake landed at 334-402 BPM while real fast charts were <= 314.
+PREFERRED_MAX_BPM = 330.0
 
 
 @dataclass
@@ -49,7 +54,7 @@ class TimingResult:
     candidates: list[Candidate] = field(default_factory=list)
     confidence: dict = field(default_factory=dict)  # tempo / phase / downbeat in 0..1
     version: int = VERSION
-    separate: bool = False
+    separate: bool = True
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -80,15 +85,15 @@ def _flux(S_db: np.ndarray) -> np.ndarray:
     return np.maximum(d, 0).mean(axis=0)
 
 
-def onset_curves(y: np.ndarray, sr: int, separate: bool = False):
+def onset_curves(y: np.ndarray, sr: int, separate: bool = True):
     """Returns (attack, body, lowband, chroma, fps). Frame i is centered at i*HOP/sr.
 
     attack: all percussive attacks, used for exact BPM and phase.
     body:   percussive attacks below ~2.5 kHz (kick, snare body, bass); ignores
             hi-hats, so offbeat hats don't make the tempo look twice as fast.
 
-    separate: split drums from melody (HPSS) first. ~3-4x slower; may help on
-    songs with heavy vocals/leads. Off by default until real charts show it's needed.
+    separate: split drums from melody (HPSS) first. ~3-4x slower, but on real
+    charts it fixed a wrong BPM family (fast mode: 8/9 right, separate: 9/9).
     """
     import librosa
     y_p = librosa.effects.hpss(y, margin=2.0)[1] if separate else y
@@ -132,7 +137,7 @@ def _sharpness(h: np.ndarray) -> float:
 
 # ------------------------------------------------------------------ detection
 
-def detect(y: np.ndarray, sr: int, start_sec: float = 0.0, separate: bool = False) -> TimingResult:
+def detect(y: np.ndarray, sr: int, start_sec: float = 0.0, separate: bool = True) -> TimingResult:
     attack, body, low, chroma, fps = onset_curves(y, sr, separate)
     s0 = int(max(0.0, start_sec) * fps)
     env = attack.copy()
@@ -224,13 +229,27 @@ def octave_ratios(envs: dict, fps, family) -> dict:
     return out
 
 
+def _is_octave_of(b: float, ref: float) -> bool:
+    k = np.log2(b / ref)
+    return abs(k - round(k)) < 1e-3
+
+
 def _choose_octave(ratios: dict) -> float:
-    """Fastest family member whose beats are all clearly hit in every curve.
-    Going 2x too fast adds offbeats the kick/bass curve doesn't hit."""
-    ok = [b for b, r in ratios.items() if all(r[k] >= OCTAVE_KEEP[k] for k in OCTAVE_KEEP)]
+    """Anchor on the candidate whose grid is strongest in *both* curves, then
+    among its true octaves (x2, /2, x4...) pick the fastest whose beats are
+    all clearly hit, staying at or below PREFERRED_MAX_BPM when possible.
+    Cross-rhythms (x2/3, x1.5) are never chosen automatically; they're
+    offered as candidates."""
+    anchor = max(ratios, key=lambda b: min(ratios[b].values()))
+    chain = sorted(b for b in ratios if _is_octave_of(b, anchor))
+    ok = [b for b in chain if all(ratios[b][k] >= OCTAVE_KEEP[k] for k in OCTAVE_KEEP)]
+    within = [b for b in ok if b <= PREFERRED_MAX_BPM]
+    if within:
+        return max(within)
     if ok:
-        return max(ok)
-    return max(ratios, key=lambda b: min(ratios[b][k] / OCTAVE_KEEP[k] for k in OCTAVE_KEEP))
+        return min(ok)
+    under = [b for b in chain if b <= PREFERRED_MAX_BPM] or chain
+    return max(under, key=lambda b: min(ratios[b][k] / OCTAVE_KEEP[k] for k in OCTAVE_KEEP))
 
 
 def _peak_near(h, idx, width=3):

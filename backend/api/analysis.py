@@ -26,7 +26,7 @@ def save_analysis(pid: str, data: dict) -> None:
 
 
 @router.post("/projects/{pid}/detect-timing")
-def detect_timing(pid: str, force: bool = False, separate: bool = False) -> dict:
+def detect_timing(pid: str, force: bool = False, separate: bool = True) -> dict:
     """Detect BPM/offset (takes a few seconds; cached in analysis.json).
     Re-runs when forced, when the detector version changed, or when a
     different mode is asked for. Never touches the project's confirmed
@@ -35,7 +35,7 @@ def detect_timing(pid: str, force: bool = False, separate: bool = False) -> dict
     data = load_analysis(pid)
     cached = data.get("timing")
     if (cached and not force and cached.get("version") == tempo.VERSION
-            and cached.get("separate", False) == separate):
+            and cached.get("separate", True) == separate):
         return cached
     samples, sr = loader.read_wav(storage.ensure_analysis_wav(pid))
     result = tempo.detect(samples, sr, separate=separate).to_dict()
