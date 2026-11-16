@@ -54,7 +54,12 @@ def relation(det: float, true: float) -> str:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("folder")
+    ap.add_argument("--debug", action="store_true",
+                    help="also print each BPM candidate's octave ratios (for tuning)")
+    ap.add_argument("--separate", action="store_true",
+                    help="split drums from melody first (slower; compare against the default)")
     a = ap.parse_args()
+    print(f"mode: {'separate (HPSS)' if a.separate else 'fast (default)'}\n")
     levels = sorted(p.parent for p in Path(a.folder).rglob("maidata.txt"))
     rows, stats = [], {"exact": 0, "octave": 0, "wrong": 0, "phase": [], "bar": 0}
     print(f"{'level':30} {'chart bpm':>10} {'detected':>10} {'bpm':>6} {'phase ms':>9} {'bar':>4}  conf      time")
@@ -77,7 +82,7 @@ def main():
             loader.make_analysis_wav(audio, wav)
             y, sr = loader.read_wav(wav)
         t0 = time.time()
-        r = tempo.detect(y, sr)
+        r = tempo.detect(y, sr, separate=a.separate)
         dt = time.time() - t0
 
         rel = relation(r.bpm, truth["bpm"])
@@ -96,6 +101,11 @@ def main():
             ph_s, bar_s = f"{'-':>9}", "-"
         conf = f"t{r.confidence.get('tempo', 0):.2f} d{r.confidence.get('downbeat', 0):.2f}"
         print(f"{name:30} {truth['bpm']:10.3f} {r.bpm:10.3f} {rel:>6} {ph_s} {bar_s:>4}  {conf}  {dt:4.1f}s")
+        if a.debug:
+            for c in sorted(r.candidates, key=lambda c: c.bpm):
+                mark = " <- chart" if abs(c.bpm - truth["bpm"]) < 1e-3 else ""
+                print(f"{'':32}{c.bpm:9.3f} {c.relation:>6}  body {c.grid.get('body', 0):.2f}  "
+                      f"low {c.grid.get('low', 0):.2f}{mark}")
 
     n = stats["exact"] + stats["octave"] + stats["wrong"]
     if n:

@@ -158,7 +158,7 @@ export class TimingControls {
     $("t-here").onclick = () => this.firstFromPlayhead();
     $("t-beat-prev").onclick = () => this.nudge(-this.beat);
     $("t-beat-next").onclick = () => this.nudge(this.beat);
-    $("t-detect").onclick = () => this.detect({ apply: true });
+    $("t-detect").onclick = () => this.detect({ apply: true, force: true });
     $("t-tap").onclick = () => this.tap();
     $("t-metro").onchange = (e) => this.metronome.setEnabled(e.target.checked);
     $("t-metro-vol").oninput = (e) => { this.metronome.volume = +e.target.value; };

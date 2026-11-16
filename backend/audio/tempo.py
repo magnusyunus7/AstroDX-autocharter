@@ -22,7 +22,10 @@ from fractions import Fraction
 
 import numpy as np
 
+VERSION = 3               # bump when results change, so cached detections are redone
 HOP = 64                  # analysis hop (samples) -> 2.9 ms at 22050 Hz
+COARSE = 4                # BPM search runs on a 4x coarser curve first
+TOP_K = 12                # ...then re-scores this many best BPMs at full resolution
 BPM_MIN, BPM_MAX = 60.0, 420.0
 FRACTIONS = (Fraction(0), Fraction(1, 3), Fraction(1, 2), Fraction(2, 3))
 # Onset curves peak slightly before/after the true attack. Measured on
@@ -35,6 +38,7 @@ class Candidate:
     bpm: float
     score: float          # fold sharpness (higher = cleaner grid)
     relation: str         # "chosen", "x2", "/2", "x1.5", ...
+    grid: dict = field(default_factory=dict)  # octave ratios per curve (debug/tuning)
 
 
 @dataclass
@@ -44,6 +48,8 @@ class TimingResult:
     beat_phase: float                 # time of the first beat (any beat) >= 0
     candidates: list[Candidate] = field(default_factory=list)
     confidence: dict = field(default_factory=dict)  # tempo / phase / downbeat in 0..1
+    version: int = VERSION
+    separate: bool = False
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -74,15 +80,18 @@ def _flux(S_db: np.ndarray) -> np.ndarray:
     return np.maximum(d, 0).mean(axis=0)
 
 
-def onset_curves(y: np.ndarray, sr: int):
+def onset_curves(y: np.ndarray, sr: int, separate: bool = False):
     """Returns (attack, body, lowband, chroma, fps). Frame i is centered at i*HOP/sr.
 
     attack: all percussive attacks, used for exact BPM and phase.
     body:   percussive attacks below ~2.5 kHz (kick, snare body, bass); ignores
             hi-hats, so offbeat hats don't make the tempo look twice as fast.
+
+    separate: split drums from melody (HPSS) first. ~3-4x slower; may help on
+    songs with heavy vocals/leads. Off by default until real charts show it's needed.
     """
     import librosa
-    _, y_p = librosa.effects.hpss(y, margin=2.0)
+    y_p = librosa.effects.hpss(y, margin=2.0)[1] if separate else y
     mel = librosa.feature.melspectrogram(y=y_p, sr=sr, n_fft=512, hop_length=HOP,
                                          n_mels=64, fmax=sr / 2, power=2.0)
     attack = _flux(librosa.power_to_db(mel, ref=np.max, top_db=80))
@@ -123,18 +132,23 @@ def _sharpness(h: np.ndarray) -> float:
 
 # ------------------------------------------------------------------ detection
 
-def detect(y: np.ndarray, sr: int, start_sec: float = 0.0) -> TimingResult:
-    attack, body, low, chroma, fps = onset_curves(y, sr)
+def detect(y: np.ndarray, sr: int, start_sec: float = 0.0, separate: bool = False) -> TimingResult:
+    attack, body, low, chroma, fps = onset_curves(y, sr, separate)
     s0 = int(max(0.0, start_sec) * fps)
     env = attack.copy()
     env[:s0] = 0
     body = body.copy()
     body[:s0] = 0
 
-    # --- 1. exact BPM: best fold sharpness over all allowed BPMs
+    # --- 1. exact BPM: fold sharpness over all allowed BPMs on a coarse curve,
+    #        then re-score the best few at full resolution
     bpms = allowed_bpms()
-    scores = np.array([_sharpness(fold(env, 60 / b * fps, 48)) for b in bpms])
-    best = float(bpms[int(np.argmax(scores))])
+    n = len(env) // COARSE * COARSE
+    coarse = env[:n].reshape(-1, COARSE).max(axis=1)
+    scores = np.array([_sharpness(fold(coarse, 60 / b * fps / COARSE, 48)) for b in bpms])
+    top = bpms[np.argsort(scores)[::-1][:TOP_K]]
+    fine = {float(b): _sharpness(fold(env, 60 / b * fps, 48)) for b in top}
+    best = max(fine, key=fine.get)
 
     # --- 2. octave family of the best BPM
     def score_of(b):
@@ -149,11 +163,12 @@ def detect(y: np.ndarray, sr: int, start_sec: float = 0.0) -> TimingResult:
 
     low_c = low.copy()
     low_c[:s0] = 0
-    chosen = _choose_octave([body, low_c], fps, family)
+    ratios = octave_ratios({"body": body, "low": low_c}, fps, family)
+    chosen = _choose_octave(ratios)
 
     candidates = sorted(
-        (Candidate(b, round(score_of(b), 3), "chosen" if b == chosen else _rel(b, chosen))
-         for b in family),
+        (Candidate(b, round(score_of(b), 3), "chosen" if b == chosen else _rel(b, chosen),
+                   ratios[b]) for b in family),
         key=lambda c: (c.relation != "chosen", -c.score))
 
     # --- 3. beat phase (sub-ms): fold at the chosen period with fine bins
@@ -191,22 +206,31 @@ def _grid_hit_strength(env, fps, bpm) -> float:
     return float(h.max() - np.median(h))
 
 
-OCTAVE_KEEP = 0.65  # a tempo must keep >= 65% of the best grid strength in every curve
+# A tempo is "fully hit" when it keeps at least this share of the best grid
+# strength in each curve. Tuned on synthetic songs (right tempo: low >= 0.73,
+# body >= 0.65; 2x too fast: low <= 0.64). Retune with tools/eval_timing.py --debug.
+OCTAVE_KEEP = {"body": 0.60, "low": 0.68}
 
 
-def _choose_octave(envs, fps, family) -> float:
-    """Fastest family member whose beats are all clearly hit, judged on
-    several curves at once (body = no hats, low = kick/bass). Going 2x too
-    fast adds offbeats that the kick/bass curve doesn't hit, so it fails
-    there even when the offbeats are busy elsewhere."""
-    ratios = {b: 1.0 for b in family}
-    for env in envs:
+def octave_ratios(envs: dict, fps, family) -> dict:
+    """{bpm: {"body": r, "low": r}}: each member's grid strength relative to
+    the strongest member, per curve."""
+    out = {b: {} for b in family}
+    for name, env in envs.items():
         strength = {b: _grid_hit_strength(env, fps, b) for b in family}
         top = max(strength.values()) or 1e-9
         for b in family:
-            ratios[b] = min(ratios[b], strength[b] / top)
-    ok = [b for b in family if ratios[b] >= OCTAVE_KEEP]
-    return max(ok) if ok else max(family, key=lambda b: ratios[b])
+            out[b][name] = round(strength[b] / top, 3)
+    return out
+
+
+def _choose_octave(ratios: dict) -> float:
+    """Fastest family member whose beats are all clearly hit in every curve.
+    Going 2x too fast adds offbeats the kick/bass curve doesn't hit."""
+    ok = [b for b, r in ratios.items() if all(r[k] >= OCTAVE_KEEP[k] for k in OCTAVE_KEEP)]
+    if ok:
+        return max(ok)
+    return max(ratios, key=lambda b: min(ratios[b][k] / OCTAVE_KEEP[k] for k in OCTAVE_KEEP))
 
 
 def _peak_near(h, idx, width=3):
