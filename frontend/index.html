@@ -23,14 +23,14 @@
           folder (maidata.txt + track.mp3 + bg) to reuse its title, artist and jacket.</p>
         <input id="file-input" type="file" multiple hidden>
       </div>
-      <form id="upload-form" hidden>
+      <form id="upload-form" autocomplete="off" hidden>
         <div class="row">
           <label>Audio <span id="up-audio" class="mono"></span></label>
           <label>Jacket <span id="up-jacket" class="mono">none</span></label>
         </div>
         <div class="row">
-          <label>Title <input id="up-title" type="text" placeholder="from tags / filename"></label>
-          <label>Artist <input id="up-artist" type="text"></label>
+          <label>Title <input id="up-title" type="text" autocomplete="off" placeholder="from tags / filename"></label>
+          <label>Artist <input id="up-artist" type="text" autocomplete="off"></label>
         </div>
         <div class="row">
           <button type="submit" class="primary">Create project</button>
@@ -53,8 +53,8 @@
       <img id="p-jacket" alt="" hidden>
       <div class="grow">
         <div class="row">
-          <label>Title <input id="p-title" type="text"></label>
-          <label>Artist <input id="p-artist" type="text"></label>
+          <label>Title <input id="p-title" type="text" autocomplete="off"></label>
+          <label>Artist <input id="p-artist" type="text" autocomplete="off"></label>
         </div>
         <p class="hint mono" id="p-info"></p>
       </div>
@@ -89,13 +89,13 @@
       <span class="hint small">Wheel: scroll · Ctrl+wheel: zoom · Drag: pan · Click: seek · Shift+drag: move grid · ←/→: ±1s (Shift ±0.1s)</span>
     </div>
     <div class="transport timing-row">
-      <label class="small">BPM <input id="t-bpm" type="number" step="0.01" min="10" max="1000" class="num"></label>
+      <label class="small">BPM <input id="t-bpm" type="number" step="0.01" min="10" max="1000" class="num" autocomplete="off"></label>
       <button id="t-half" title="Halve BPM">÷2</button>
       <button id="t-x2" title="Double BPM">×2</button>
       <button id="t-tap" title="Tap tempo (T)">Tap</button>
       <span id="tap-info" class="hint small"></span>
       <span class="sep"></span>
-      <label class="small">Offset (s) <input id="t-first" type="number" step="0.0001" min="0" class="num wide"></label>
+      <label class="small">Offset (s) <input id="t-first" type="number" step="0.0001" min="0" class="num wide" autocomplete="off"></label>
       <button data-nudge="-10" title="Shift+[">−10ms</button>
       <button data-nudge="-1" title="[">−1ms</button>
       <button data-nudge="1" title="]">+1ms</button>
