@@ -103,3 +103,9 @@ kbd {
   font-family: ui-monospace, Consolas, monospace; font-size: 11px; padding: 0 4px;
   border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; color: var(--text);
 }
+
+.chip {
+  border-radius: 14px; padding: 3px 10px; font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+}
+.chip .rel { color: var(--muted); margin-left: 4px; }
+.chip.active { border-color: var(--accent); background: #4fc3f722; }

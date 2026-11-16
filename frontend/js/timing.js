@@ -35,17 +35,65 @@ export class TimingControls {
 
   load(project, meta) {
     this.project = project;
+    this.detected = null;
+    this._renderDetected();
     if (project.timing) {
       this.bpm = project.timing.bpm;
       this.first = project.timing.first;
       this.saved = project.timing.confirmed ? { bpm: this.bpm, first: this.first } : null;
+      this._refresh();
+      this.detect({ apply: false });   // just to show the candidates
     } else {
-      // No detection until Phase 1.4: start at 120 BPM with beat 1 on the first sound.
+      // placeholder until detection finishes, then apply its result
       this.bpm = 120;
       this.first = meta.first_sound || 0;
       this.saved = null;
+      this._refresh();
+      this.detect({ apply: true });
     }
-    this._refresh();
+  }
+
+  /** Run (or fetch cached) detection. apply: also set BPM/offset from it. */
+  async detect({ apply = true, force = false } = {}) {
+    const pid = this.project.id;
+    const btn = $("t-detect");
+    btn.disabled = true;
+    $("detect-info").textContent = "Detecting… (a few seconds)";
+    try {
+      const d = await api.detectTiming(pid, force);
+      if (this.project?.id !== pid) return;   // user switched projects meanwhile
+      this.detected = d;
+      if (apply) { this.bpm = d.bpm; this.first = d.first; }
+      this._renderDetected();
+      this._refresh();
+    } catch (e) {
+      $("detect-info").textContent = "Detection failed: " + e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  _renderDetected() {
+    const box = $("bpm-chips");
+    const d = this.detected;
+    if (!d) { box.replaceChildren(); if (!this.project) $("detect-info").textContent = ""; return; }
+    const pct = (x) => `${Math.round((x ?? 0) * 100)}%`;
+    $("detect-info").textContent =
+      `Detected ${d.bpm} BPM, beat 1 at ${d.first.toFixed(4)} s · confidence: tempo ${pct(d.confidence.tempo)}, ` +
+      `beat 1 ${pct(d.confidence.downbeat)}`;
+    const label = document.createElement("span");
+    label.className = "hint"; label.textContent = "BPM candidates:";
+    const chips = d.candidates.map((c) => {
+      const b = document.createElement("button");
+      b.className = "chip";
+      b.dataset.bpm = c.bpm;
+      b.innerHTML = `${+c.bpm.toFixed(4)}<span class="rel">${c.relation === "chosen" ? "★" : c.relation}</span>`;
+      b.onclick = () => this.setBpm(c.bpm);
+      return b;
+    });
+    const reset = Object.assign(document.createElement("button"), { textContent: "Use detected values" });
+    reset.onclick = () => { this.bpm = d.bpm; this.first = d.first; this._refresh(); };
+    box.replaceChildren(label, ...chips, reset);
   }
 
   // ------------------------------------------------------------ setters
@@ -108,6 +156,9 @@ export class TimingControls {
       btn.onclick = () => this.nudge(parseFloat(btn.dataset.nudge) / 1000);
     }
     $("t-here").onclick = () => this.firstFromPlayhead();
+    $("t-beat-prev").onclick = () => this.nudge(-this.beat);
+    $("t-beat-next").onclick = () => this.nudge(this.beat);
+    $("t-detect").onclick = () => this.detect({ apply: true });
     $("t-tap").onclick = () => this.tap();
     $("t-metro").onchange = (e) => this.metronome.setEnabled(e.target.checked);
     $("t-metro-vol").oninput = (e) => { this.metronome.volume = +e.target.value; };
@@ -122,6 +173,8 @@ export class TimingControls {
       if (k === "m") { const c = $("t-metro"); c.checked = !c.checked; c.onchange({ target: c }); }
       else if (k === "t") this.tap();
       else if (k === "o") this.firstFromPlayhead();
+      else if (e.key === ",") this.nudge(-this.beat);
+      else if (e.key === ".") this.nudge(this.beat);
       else if (e.key === "[" || e.key === "{") this.nudge(e.shiftKey ? -0.01 : -0.001);
       else if (e.key === "]" || e.key === "}") this.nudge(e.shiftKey ? 0.01 : 0.001);
       else return;
@@ -138,6 +191,9 @@ export class TimingControls {
       st.textContent = "✓ confirmed"; st.className = "status ok";
     } else {
       st.textContent = this.saved ? "● unsaved changes" : "● not confirmed"; st.className = "status warn";
+    }
+    for (const c of document.querySelectorAll("#bpm-chips .chip")) {
+      c.classList.toggle("active", Math.abs(+c.dataset.bpm - this.bpm) < 1e-3);
     }
     $("timing-summary").textContent =
       `BPM ${this.bpm} · beat ${(this.beat * 1000).toFixed(1)} ms · bar ${(this.bar * 1000).toFixed(1)} ms · ` +

@@ -96,3 +96,18 @@ def test_timing_save_and_validate(client, mp3):
     assert t == {"bpm": 314.0, "first": 0.1234, "confirmed": True}
     for bad in ({"bpm": 0, "first": 0}, {"bpm": 120, "first": -1}, {"bpm": 120, "first": 99}):
         assert client.put(f"/api/projects/{pid}/timing", json=bad).status_code in (400, 422)
+
+
+def test_detect_timing_route(client, tmp_path):
+    from tools.make_test_song import make, write_mp3
+    mp3 = tmp_path / "d.mp3"
+    write_mp3(make(150, 1.0, 24, seed=2), mp3)
+    pid = upload(client, mp3).json()["id"]
+    r = client.post(f"/api/projects/{pid}/detect-timing")
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["bpm"] == 150 and abs(d["first"] - 1.0) < 0.005
+    assert d["candidates"][0]["relation"] == "chosen"
+    # cached, and the project's own timing is untouched
+    assert client.post(f"/api/projects/{pid}/detect-timing").json() == d
+    assert client.get(f"/api/projects/{pid}").json()["timing"] is None
