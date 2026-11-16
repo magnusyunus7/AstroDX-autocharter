@@ -31,7 +31,8 @@ def test_detect_synthetic(tmp_path, bpm, first):
     # bias is calibrated on real charts (+-4.5 ms vs these very sharp synthetic drums)
     assert abs(phase_err * beat) < 0.008
     assert round((r.first - first) / beat) % 4 == 0           # right downbeat
-    assert any(c.relation == "x2" for c in r.candidates) or bpm * 2 > tempo.BPM_MAX
+    rels = {c.relation for c in r.candidates}
+    assert ("/2" in rels or bpm / 2 < tempo.BPM_MIN) and ("x2" in rels or bpm * 2 > tempo.BPM_MAX)
 
 
 def test_octave_chain_rule():

@@ -22,7 +22,7 @@ from fractions import Fraction
 
 import numpy as np
 
-VERSION = 4               # bump when results change, so cached detections are redone
+VERSION = 5               # bump when results change, so cached detections are redone
 HOP = 64                  # analysis hop (samples) -> 2.9 ms at 22050 Hz
 COARSE = 4                # BPM search runs on a 4x coarser curve first
 TOP_K = 12                # ...then re-scores this many best BPMs at full resolution
@@ -171,6 +171,12 @@ def detect(y: np.ndarray, sr: int, start_sec: float = 0.0, separate: bool = True
     ratios = octave_ratios({"body": body, "low": low_c}, fps, family)
     chosen = _choose_octave(ratios)
 
+    # always offer exactly half and double of the chosen BPM (e.g. a chart
+    # written at 57.333 for a song detected at 114.667)
+    for b in (snap_bpm(chosen / 2), snap_bpm(chosen * 2)):
+        if b is not None and BPM_MIN <= b <= BPM_MAX and b not in family:
+            family[b] = ""
+            ratios[b] = {}
     candidates = sorted(
         (Candidate(b, round(score_of(b), 3), "chosen" if b == chosen else _rel(b, chosen),
                    ratios[b]) for b in family),
