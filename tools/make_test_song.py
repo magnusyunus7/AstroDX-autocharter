@@ -54,9 +54,12 @@ def tone(freq, dur, amp, sr=SR, decay=None):
     return x * a * (_env(n, decay) if decay else 1)
 
 
-def make(bpm: float, first: float, bars: int, seed: int = 1, events: list | None = None) -> np.ndarray:
+def make(bpm: float, first: float, bars: int, seed: int = 1, events: list | None = None,
+         triplet_bars: range = range(0), glitch_bars: range = range(0)) -> np.ndarray:
     """Render the song. If `events` is a list, (time, kind) of every sound is
-    appended to it (kinds: kick, snare, hat, bass, chord, pad)."""
+    appended to it (kinds: kick, snare, hat, bass, chord, pad).
+    triplet_bars: bars played as a shuffle (kick/snare/hats on triplet positions).
+    glitch_bars: bars of irregular stutter hits at random times (no grid)."""
     rng = np.random.default_rng(seed)
     beat = 60 / bpm
     total = first + bars * 4 * beat + 2.0
@@ -87,6 +90,19 @@ def make(bpm: float, first: float, bars: int, seed: int = 1, events: list | None
         for c in chords[bar % 4]:
             add(tone(c, 4 * beat, 0.035), t0, "chord")  # sustained pad: changes on downbeats
         if bar in breakdown:
+            continue
+        if bar in glitch_bars:
+            for _ in range(14):                       # random stutters, loud, off any grid
+                add((k if rng.random() < 0.5 else s) * rng.uniform(0.6, 1.0),
+                    t0 + rng.uniform(0, 4 * beat), "glitch")
+            continue
+        if bar in triplet_bars:
+            for b in range(4):
+                tb = t0 + b * beat
+                add(tone(roots[bar % 4], beat * 0.9, 0.22, decay=0.25), tb, "bass")
+                add(k if b % 2 == 0 else s, tb, "kick" if b % 2 == 0 else "snare")
+                add(hat(rng) * 1.5, tb + beat / 3, "hat")
+                add(k * 0.8, tb + 2 * beat / 3, "kick")  # shuffle kick
             continue
         for b in range(4):
             tb = t0 + b * beat

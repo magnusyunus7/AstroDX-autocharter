@@ -1,7 +1,8 @@
 // Phase 2 analysis view: grid onsets per stem (drums / bass / melody) drawn as
 // lanes at the bottom of the waveform, and bar-by-bar grid fit drawn as a
 // strip under the ruler (red = hits don't sit on the grid, grey = too quiet
-// to judge). Analysis runs on the *confirmed* timing.
+// to judge, yellow = loose/irregular rhythm like rolls or glitches). Analysis
+// runs on the *confirmed* timing.
 
 import { api, fmtTime } from "./api.js";
 
@@ -22,8 +23,24 @@ export class AnalysisView {
     this.projectId = null;
     this.showOnsets = true;
     timeline.overlays.push((g, v) => this._draw(g, v));
+    timing.onChange = () => this._syncWithTiming();
     $("show-onsets").onchange = (e) => { this.showOnsets = e.target.checked; this.tl.draw(); };
     $("btn-reanalyze").onclick = () => this.load(this.timing.project, { force: true });
+  }
+
+  /** Analysis only describes the *confirmed* timing. While the user has
+   *  unconfirmed edits, don't offer stale results or a re-run on the old grid. */
+  _syncWithTiming() {
+    const btn = $("btn-reanalyze");
+    if (!this.timing.project?.timing?.confirmed) return;   // load() handles this case
+    if (this.loading) return;
+    if (this.timing.dirty) {
+      btn.disabled = true;
+      this._info("Timing changed since the analysis: press Confirm timing to re-analyze.", "warn-text");
+    } else {
+      btn.disabled = false;
+      if (this.data) this._summarize();
+    }
   }
 
   async load(project, { force = false } = {}) {
@@ -38,6 +55,7 @@ export class AnalysisView {
     }
     btn.hidden = false;
     btn.disabled = true;
+    this.loading = true;
     this._info("Analyzing onsets and grid fit… (about 10–20 s the first time)", "");
     try {
       const d = await api.analyze(project.id, force);
@@ -47,7 +65,8 @@ export class AnalysisView {
     } catch (e) {
       this._info("Analysis failed: " + e.message, "warn-text");
     } finally {
-      btn.disabled = false;
+      this.loading = false;
+      this._syncWithTiming();
       this.tl.draw();
     }
   }
@@ -58,15 +77,18 @@ export class AnalysisView {
   _summarize() {
     const d = this.data, s = d.summary;
     const n = d.bars.length;
+    const pl = (k, word) => `${k} ${word}${k === 1 ? "" : "s"}`;
+    const irr = s.irregular_bars ? ` ${pl(s.irregular_bars, "bar")} with loose rhythm (yellow: rolls, ` +
+      `glitches, free-time parts) can't be judged.` : "";
     if (s.drift) {
       this._info(`⚠ From bar ${this.barNo(s.from_bar)} (${fmtTime(s.from_time).slice(0, 5)}) the hits stop ` +
         `matching the grid: the tempo changes there, or the BPM is slightly off. ` +
-        `${s.off_bars} of ${n} bars affected (red).`, "warn-text");
+        `${s.off_bars} of ${n} bars affected (red).` + irr, "bad-text");
     } else if (s.off_bars > 0) {
-      this._info(`Analysis: grid fits the song (${s.off_bars} isolated bar${s.off_bars > 1 ? "s" : ""} ` +
-        `marked red; usually fills or syncopation, worth a quick listen).`, "");
+      this._info(`Analysis: the grid fits the song; ${pl(s.off_bars, "isolated bar")} marked red ` +
+        `(worth a quick listen).` + irr, "warn-text");
     } else {
-      this._info(`✓ Analysis: the grid fits all ${n} bars.`, "ok-text");
+      this._info(`✓ Analysis: the grid fits the song (${n} bars).` + irr, "ok-text");
     }
   }
 
@@ -93,6 +115,8 @@ export class AnalysisView {
         if (bar.status === "off") {
           g.fillStyle = "#ff52521c"; g.fillRect(x0, rulerH, x1 - x0, h - rulerH);
           g.fillStyle = "#ff5252"; g.fillRect(x0, rulerH, x1 - x0, 4);
+        } else if (bar.status === "irregular") {
+          g.fillStyle = "#ffd54f"; g.fillRect(x0, rulerH, x1 - x0, 4);
         } else {
           g.fillStyle = "#ffffff30"; g.fillRect(x0, rulerH, x1 - x0, 4);
         }

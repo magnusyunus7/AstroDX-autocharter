@@ -57,3 +57,16 @@ def test_tempo_change_is_flagged_where_it_happens(tmp_path):
     assert s["drift"] is True
     change_t = 1.0 + 16 * 4 * 60 / 170
     assert abs(s["from_time"] - change_t) < 2 * 4 * 60 / 170   # within 2 bars
+
+
+def test_shuffle_is_on_grid_and_glitches_are_not_drift(tmp_path):
+    from tools.make_test_song import make
+    bpm, first = 150, 1.0   # at 150 BPM triplets sit 33 ms from the nearest 16th
+    y, sr = render(tmp_path, make(bpm, first, 28, seed=41,
+                                  triplet_bars=range(5, 11), glitch_bars=range(20, 23)))
+    a = features.analyze(y, sr, bpm, first)
+    k_shift = -a["k_start"] // 4        # song bar i is analysis bar i + k_shift
+    status = [b["status"] for b in a["bars"]]
+    assert all(status[i + k_shift] == "ok" for i in range(6, 10))          # shuffle: fits
+    assert all(status[i + k_shift] in ("irregular", "quiet") for i in (20, 21, 22))
+    assert a["summary"]["drift"] is False and a["summary"]["off_bars"] == 0

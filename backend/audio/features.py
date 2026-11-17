@@ -15,7 +15,7 @@ import math
 
 import numpy as np
 
-VERSION = 1
+VERSION = 3
 HOP = 64                  # ~2.9 ms at 22050 Hz
 SUBDIV = 12               # grid points per beat (lcm of 4 and 3)
 STEMS = ("drums", "bass", "melody")
@@ -27,6 +27,8 @@ BIAS_SEC = {"drums": -0.0068, "bass": -0.0171, "melody": -0.0265}
 
 DRIFT_MS = 22.0           # a bar whose hits sit further than this from the grid is "off"
 LOW_CONTRAST = 0.45       # ...or whose hits are this much less grid-locked than usual
+CLEAR_CONTRAST = 0.8      # offsets are only trusted in bars at least this grid-locked
+                          # (in weaker bars the peak, hence the offset, is mostly noise)
 QUIET_ENERGY = 0.5        # bars quieter than this x typical are not judged (breakdowns)
 DRIFT_RUN = 3             # this many consecutive off bars -> warning
 
@@ -118,58 +120,94 @@ def grid_onsets(curves, fps, bpm, first, duration) -> dict:
     return {"k_start": k_start, "n_beats": n_beats, "subdiv": SUBDIV, "stems": out}
 
 
+GRID_POINTS = (0.0, 0.25, 1 / 3, 0.5, 2 / 3, 0.75, 1.0)   # 16ths and triplets within a beat
+OTHER_TEMPO = 1.6         # a nearby BPM must fit this much better to call a bar "off",
+                          # and give a clear grid itself (>= CLEAR_CONTRAST x typical):
+                          # trying ~60 tempos on loose rhythm always finds a slightly better one
+
+
+def _fold_beat(env, frame_t, i0, i1, first, period, nb=96):
+    ph = ((frame_t[i0:i1] - first) / period) % 1.0
+    h = np.bincount((ph * nb).astype(int) % nb, weights=env[i0:i1], minlength=nb)
+    return (h + np.roll(h, 1) + np.roll(h, -1)) / 3
+
+
+def _contrast(h):
+    return float((h.max() - np.median(h)) / (h.mean() + 1e-9))
+
+
 def bar_fit(curves, fps, bpm, first, k_start, n_beats) -> list[dict]:
-    """Per bar: offset of the hits from the 16th grid (ms, + = hits late) and
-    a status: ok / off / quiet. Uses the bar plus half a bar either side."""
+    """Per bar (with half a bar of context either side):
+      offset_ms  how far the strongest hits sit from the nearest 16th or
+                 triplet position (+ = late)
+      contrast   how grid-locked the hits are
+      status     ok / off (hits don't fit this tempo/offset here) /
+                 irregular (rhythm too loose to judge: rolls, glitches,
+                 free-time intros) / quiet (breakdown, silence)"""
     beat = 60.0 / bpm
     env = curves["drums"] + curves["bass"]
     n_bars = n_beats // 4
-    sixteenth = beat / 4
-    nb = 48                                   # phase bins per 16th
     frame_t = np.arange(len(env)) / fps
-    bar_energy = []
-    rows = []
+    rows, bar_energy = [], []
     for b in range(n_bars):
         t0 = first + (k_start + 4 * b - 2) * beat
-        t1 = t0 + 8 * beat
-        i0, i1 = max(0, int(t0 * fps)), min(len(env), int(t1 * fps))
-        seg = env[i0:i1]
-        if len(seg) < 8:
+        i0, i1 = max(0, int(t0 * fps)), min(len(env), int((t0 + 8 * beat) * fps))
+        if i1 - i0 < 8:
             rows.append(None); bar_energy.append(0.0); continue
-        ph = ((frame_t[i0:i1] - first) / sixteenth) % 1.0
-        hist = np.bincount((ph * nb).astype(int) % nb, weights=seg, minlength=nb)
-        hist = (hist + np.roll(hist, 1) + np.roll(hist, -1)) / 3
-        peak = int(np.argmax(hist))
-        frac = (peak + 0.5) / nb
-        off = (frac if frac <= 0.5 else frac - 1.0) * sixteenth
-        contrast = float((hist.max() - np.median(hist)) / (hist.mean() + 1e-9))
-        # energy of the bar itself (not the +-half-bar context)
+        h = _fold_beat(env, frame_t, i0, i1, first, beat)
+        frac = (int(np.argmax(h)) + 0.5) / len(h)
+        nearest = min(GRID_POINTS, key=lambda g: abs(frac - g))
+        off = (frac - nearest) * beat
         c0, c1 = max(0, int((t0 + 2 * beat) * fps)), min(len(env), int((t0 + 6 * beat) * fps))
         e_bar = float(env[c0:c1].mean()) if c1 > c0 else 0.0
-        rows.append({"offset_ms": round(off * 1000, 1), "contrast": round(contrast, 2),
-                     "energy": round(e_bar, 4)})
+        rows.append({"offset_ms": round(off * 1000, 1), "contrast": round(_contrast(h), 2),
+                     "energy": round(e_bar, 4), "i0": i0, "i1": i1})
         bar_energy.append(e_bar)
 
     e = np.array(bar_energy)
     loud = np.median(e[e > 0]) if (e > 0).any() else 1.0
     judged = [r["contrast"] for b, r in enumerate(rows) if r and e[b] >= QUIET_ENERGY * loud]
     typical = float(np.median(judged)) if judged else 1.0
+
+    def other_tempo_fits(r) -> bool:
+        """Does a nearby different BPM (+-15%) fit this stretch much better?
+        That's a tempo change; if nothing fits, the rhythm is just irregular."""
+        # widen to 4 bars for tempo resolution
+        mid = (r["i0"] + r["i1"]) // 2
+        half = int(8 * beat * fps)
+        i0, i1 = max(0, mid - half), min(len(env), mid + half)
+        here = _contrast(_fold_beat(env, frame_t, i0, i1, first, beat))
+        best = 0.0
+        for f in np.arange(0.85, 1.151, 0.005):
+            if abs(f - 1) < 0.004:
+                continue
+            p = beat / f
+            # phase-free: fold anchored at the window start
+            best = max(best, _contrast(_fold_beat(env, frame_t, i0, i1, frame_t[i0], p)))
+        return best > OTHER_TEMPO * here and best >= CLEAR_CONTRAST * typical
+
     bars = []
     for b, r in enumerate(rows):
         if r is None or e[b] < QUIET_ENERGY * loud:
-            status = "quiet"           # too little rhythm to judge (breakdown, silence)
-        elif abs(r["offset_ms"]) > DRIFT_MS or r["contrast"] < LOW_CONTRAST * typical:
-            status = "off"             # hits don't sit on the grid here
+            status = "quiet"
+        elif r["contrast"] < LOW_CONTRAST * typical:
+            # hits aren't grid-locked: a different tempo here, or just loose rhythm?
+            status = "off" if other_tempo_fits(r) else "irregular"
+        elif r["contrast"] >= CLEAR_CONTRAST * typical and abs(r["offset_ms"]) > DRIFT_MS:
+            status = "off"             # clearly locked, but beside the grid
+        elif r["contrast"] < CLEAR_CONTRAST * typical and other_tempo_fits(r):
+            status = "off"             # weakly locked, and another tempo fits clearly better
         else:
             status = "ok"
-        bars.append({"bar": b, "status": status,
-                     **(r or {"offset_ms": 0.0, "contrast": 0.0, "energy": 0.0})})
+        info = {k: v for k, v in (r or {"offset_ms": 0.0, "contrast": 0.0, "energy": 0.0}).items()
+                if k not in ("i0", "i1")}
+        bars.append({"bar": b, "status": status, **info})
     return bars
 
 
 def drift_summary(bars: list[dict], bpm: float, first: float, k_start: int) -> dict:
     """Find the first run of DRIFT_RUN+ consecutive 'off' bars (quiet bars in
-    between don't break a run)."""
+    between don't break a run; ok or irregular bars do)."""
     beat = 60.0 / bpm
     run, start = 0, None
     for b in bars:
@@ -180,10 +218,12 @@ def drift_summary(bars: list[dict], bpm: float, first: float, k_start: int) -> d
             if run >= DRIFT_RUN:
                 t = first + (k_start + 4 * start) * beat
                 return {"drift": True, "from_bar": start, "from_time": round(max(0.0, t), 3),
-                        "off_bars": sum(x["status"] == "off" for x in bars)}
-        elif b["status"] == "ok":
+                        "off_bars": sum(x["status"] == "off" for x in bars),
+                        "irregular_bars": sum(x["status"] == "irregular" for x in bars)}
+        elif b["status"] in ("ok", "irregular"):
             run = 0
-    return {"drift": False, "off_bars": sum(x["status"] == "off" for x in bars)}
+    return {"drift": False, "off_bars": sum(x["status"] == "off" for x in bars),
+            "irregular_bars": sum(x["status"] == "irregular" for x in bars)}
 
 
 def analyze(y: np.ndarray, sr: int, bpm: float, first: float) -> dict:

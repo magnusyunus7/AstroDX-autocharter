@@ -20,7 +20,8 @@ export class TimingControls {
     this.saved = null;     // {bpm, first} as last saved/confirmed
     this.taps = [];
     this.edits = 0;
-    this.onConfirmed = () => {};  // set by the project view (re-runs analysis)        // bumps on every user change (so detection won't overwrite them)
+    this.onConfirmed = () => {};  // set by the project view (re-runs analysis)
+    this.onChange = () => {};     // called whenever bpm/offset/saved state changes        // bumps on every user change (so detection won't overwrite them)
     this.metronome = new Metronome(player, () => ({ bpm: this.bpm, first: this.first, beatsPerBar: BEATS_PER_BAR }));
 
     timeline.overlays.push((g, v) => this._drawGrid(g, v));
@@ -206,6 +207,7 @@ export class TimingControls {
     for (const c of document.querySelectorAll("#bpm-chips .chip")) {
       c.classList.toggle("active", Math.abs(+c.dataset.bpm - this.bpm) < 1e-3);
     }
+    this.onChange();
     $("timing-summary").textContent =
       `BPM ${this.bpm} · beat ${(this.beat * 1000).toFixed(1)} ms · bar ${(this.bar * 1000).toFixed(1)} ms · ` +
       `downbeat at ${fmtTime(this.first)}`;

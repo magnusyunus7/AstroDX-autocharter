@@ -143,3 +143,4 @@ kbd {
 .warn-text { color: #ffb74d !important; }
 .ok-text { color: #69f0ae !important; }
 button.small-btn { padding: 1px 8px; font-size: 12px; }
+.bad-text { color: #ff6b6b !important; }
