@@ -19,6 +19,7 @@ export class TimingControls {
     this.first = 0;
     this.saved = null;     // {bpm, first} as last saved/confirmed
     this.taps = [];
+    this.edits = 0;        // bumps on every user change (so detection won't overwrite them)
     this.metronome = new Metronome(player, () => ({ bpm: this.bpm, first: this.first, beatsPerBar: BEATS_PER_BAR }));
 
     timeline.overlays.push((g, v) => this._drawGrid(g, v));
@@ -56,6 +57,7 @@ export class TimingControls {
   /** Run (or fetch cached) detection. apply: also set BPM/offset from it. */
   async detect({ apply = true, force = false } = {}) {
     const pid = this.project.id;
+    const editsBefore = this.edits;
     const btn = $("t-detect");
     btn.disabled = true;
     $("detect-info").textContent = "Detecting… (about 15 s for a 3-minute song, only the first time)";
@@ -63,7 +65,8 @@ export class TimingControls {
       const d = await api.detectTiming(pid, force);
       if (this.project?.id !== pid) return;   // user switched projects meanwhile
       this.detected = d;
-      if (apply) { this.bpm = d.bpm; this.first = d.first; }
+      // don't overwrite anything the user changed while detection was running
+      if (apply && this.edits === editsBefore) { this.bpm = d.bpm; this.first = d.first; }
       this._renderDetected();
       this._refresh();
     } catch (e) {
@@ -78,9 +81,13 @@ export class TimingControls {
     const d = this.detected;
     if (!d) { box.replaceChildren(); if (!this.project) $("detect-info").textContent = ""; return; }
     const pct = (x) => `${Math.round((x ?? 0) * 100)}%`;
-    $("detect-info").textContent =
-      `Detected ${d.bpm} BPM, beat 1 at ${d.first.toFixed(4)} s · confidence: tempo ${pct(d.confidence.tempo)}, ` +
-      `beat 1 ${pct(d.confidence.downbeat)}`;
+    // real songs score 0.5-0.7; beatless audio (drones, silence, ambient) well below
+    const weak = (d.confidence.tempo ?? 0) < 0.4;
+    $("detect-info").textContent = weak
+      ? `⚠ No clear beat found (tempo ${pct(d.confidence.tempo)}). Best guess ${d.bpm} BPM; set the timing by hand.`
+      : `Detected ${d.bpm} BPM, beat 1 at ${d.first.toFixed(4)} s · confidence: tempo ${pct(d.confidence.tempo)}, ` +
+        `beat 1 ${pct(d.confidence.downbeat)}`;
+    $("detect-info").classList.toggle("warn-text", weak);
     const label = document.createElement("span");
     label.className = "hint"; label.textContent = "BPM candidates:";
     const chips = d.candidates.map((c) => {
@@ -99,12 +106,14 @@ export class TimingControls {
   // ------------------------------------------------------------ setters
   setBpm(bpm) {
     if (!isFinite(bpm) || bpm <= 10 || bpm > 1000) return;
+    this.edits++;
     this.bpm = Math.round(bpm * 10000) / 10000;
     this._refresh();
   }
 
   setFirst(t) {
     if (!isFinite(t)) return;
+    this.edits++;
     // keep it inside the song by wrapping whole bars (same grid, different bar 1)
     while (t < 0) t += this.bar;
     const dur = this.project?.duration ?? Infinity;
