@@ -141,3 +141,5 @@ kbd {
 #t-metro-vol { width: 80px; }
 #vol { width: 110px; }
 .warn-text { color: #ffb74d !important; }
+.ok-text { color: #69f0ae !important; }
+button.small-btn { padding: 1px 8px; font-size: 12px; }

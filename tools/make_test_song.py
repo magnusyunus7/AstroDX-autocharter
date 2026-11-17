@@ -54,14 +54,18 @@ def tone(freq, dur, amp, sr=SR, decay=None):
     return x * a * (_env(n, decay) if decay else 1)
 
 
-def make(bpm: float, first: float, bars: int, seed: int = 1) -> np.ndarray:
+def make(bpm: float, first: float, bars: int, seed: int = 1, events: list | None = None) -> np.ndarray:
+    """Render the song. If `events` is a list, (time, kind) of every sound is
+    appended to it (kinds: kick, snare, hat, bass, chord, pad)."""
     rng = np.random.default_rng(seed)
     beat = 60 / bpm
     total = first + bars * 4 * beat + 2.0
     y = np.zeros(int(total * SR) + SR)
 
-    def add(x, t):
+    def add(x, t, kind=""):
         t += rng.uniform(-0.003, 0.003)              # human jitter
+        if events is not None and kind:
+            events.append((t, kind))
         i = int(round(t * SR))
         if i < 0:
             return
@@ -81,21 +85,21 @@ def make(bpm: float, first: float, bars: int, seed: int = 1) -> np.ndarray:
     for bar in range(bars):
         t0 = first + bar * 4 * beat
         for c in chords[bar % 4]:
-            add(tone(c, 4 * beat, 0.035), t0)        # sustained pad: changes on downbeats
+            add(tone(c, 4 * beat, 0.035), t0, "chord")  # sustained pad: changes on downbeats
         if bar in breakdown:
             continue
         for b in range(4):
             tb = t0 + b * beat
-            add(tone(roots[bar % 4], beat * 0.9, 0.22, decay=0.25), tb)
+            add(tone(roots[bar % 4], beat * 0.9, 0.22, decay=0.25), tb, "bass")
             if b in (0, 2):
-                add(k, tb)
+                add(k, tb, "kick")
             if b in (1, 3):
-                add(s, tb)
-            add(hat(rng), tb + beat / 2)
+                add(s, tb, "snare")
+            add(hat(rng), tb + beat / 2, "hat")
             if b == 0:
                 add(hat(rng) * 2.5, tb)               # crash-ish accent on the downbeat
         if bar % 2 == 1:
-            add(k * 0.7, t0 + 2.5 * beat)             # syncopated kick
+            add(k * 0.7, t0 + 2.5 * beat, "kick")     # syncopated kick
 
     y /= np.abs(y).max() * 1.1
     return y

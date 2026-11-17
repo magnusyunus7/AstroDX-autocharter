@@ -19,7 +19,8 @@ export class TimingControls {
     this.first = 0;
     this.saved = null;     // {bpm, first} as last saved/confirmed
     this.taps = [];
-    this.edits = 0;        // bumps on every user change (so detection won't overwrite them)
+    this.edits = 0;
+    this.onConfirmed = () => {};  // set by the project view (re-runs analysis)        // bumps on every user change (so detection won't overwrite them)
     this.metronome = new Metronome(player, () => ({ bpm: this.bpm, first: this.first, beatsPerBar: BEATS_PER_BAR }));
 
     timeline.overlays.push((g, v) => this._drawGrid(g, v));
@@ -146,6 +147,7 @@ export class TimingControls {
     try {
       this.project = await api.putTiming(this.project.id, { bpm: this.bpm, first: this.first, confirmed: true });
       this.saved = { bpm: this.bpm, first: this.first };
+      this.onConfirmed(this.project);
     } catch (e) {
       alert("Couldn't save timing: " + e.message);
     } finally {

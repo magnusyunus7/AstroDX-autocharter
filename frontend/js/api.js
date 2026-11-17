@@ -25,6 +25,8 @@ export const api = {
   deleteProject: async (id) => (await req("DELETE", `/api/projects/${id}`)).json(),
   detectTiming: async (id, force = false) =>
     (await req("POST", `/api/projects/${id}/detect-timing${force ? "?force=true" : ""}`)).json(),
+  analyze: async (id, force = false) =>
+    (await req("POST", `/api/projects/${id}/analyze${force ? "?force=true" : ""}`)).json(),
   putTiming: async (id, timing) => (await req("PUT", `/api/projects/${id}/timing`, timing)).json(),
 
   trackUrl: (id) => `/api/projects/${id}/track.mp3`,

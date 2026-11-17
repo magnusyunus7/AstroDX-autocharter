@@ -5,10 +5,12 @@ import { Player } from "./player.js";
 import { Timeline } from "./timeline.js";
 import { measureDecoderOffset } from "./decodercheck.js";
 import { TimingControls } from "./timing.js";
+import { AnalysisView } from "./analysis.js";
 
 const player = new Player();
 let timeline = null;
 let timing = null;
+let analysis = null;
 let current = null;   // project
 let raf = 0;
 
@@ -18,6 +20,8 @@ export function initProject() {
     onSeek: (t) => { player.seek(t); timeline.draw(); },
   });
   timing = new TimingControls(player, timeline);
+  analysis = new AnalysisView(timeline, timing);
+  timing.onConfirmed = (p) => { current = p; analysis.load(p); };
   player.onstate = () => {
     document.getElementById("btn-play").textContent = player.playing ? "❚❚" : "▶";
     timeline.playing = player.playing;
@@ -84,6 +88,7 @@ export async function showProject(id) {
   timeline.markers = [{ t: meta.first_sound, color: "#ffab40", label: "first sound" }];
   timeline.setAudio(peaks, meta, current.duration);
   timing.load(current, meta);
+  analysis.load(current);
 
   const buf = await player.load(bytes);
   player.setVolume(+document.getElementById("vol").value);

@@ -111,3 +111,20 @@ def test_detect_timing_route(client, tmp_path):
     # cached, and the project's own timing is untouched
     assert client.post(f"/api/projects/{pid}/detect-timing").json() == d
     assert client.get(f"/api/projects/{pid}").json()["timing"] is None
+
+
+def test_analyze_requires_confirmed_timing_and_caches(client, tmp_path):
+    from tools.make_test_song import make, write_mp3
+    mp3 = tmp_path / "a.mp3"
+    write_mp3(make(150, 1.0, 12, seed=4), mp3)
+    pid = upload(client, mp3).json()["id"]
+    assert client.post(f"/api/projects/{pid}/analyze").status_code == 400
+    client.put(f"/api/projects/{pid}/timing", json={"bpm": 150, "first": 1.0})
+    r = client.post(f"/api/projects/{pid}/analyze")
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["bpm"] == 150 and set(d["stems"]) == {"drums", "bass", "melody"}
+    assert len(d["stems"]["drums"]) == d["n_beats"] * d["subdiv"]
+    assert client.post(f"/api/projects/{pid}/analyze").json() == d          # cached
+    client.put(f"/api/projects/{pid}/timing", json={"bpm": 150, "first": 1.4})
+    assert client.post(f"/api/projects/{pid}/analyze").json()["first"] == 1.4  # redone
