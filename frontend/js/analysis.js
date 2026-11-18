@@ -14,6 +14,10 @@ const LANES = [
   { stem: "melody", color: "#69f0ae", label: "melody", min: 50 },
 ];
 const LANE_H = 13;
+const SECTION_COLORS = ["#4fc3f7", "#ba68c8", "#ff8a65", "#81c784", "#ffd54f", "#f06292",
+                        "#4db6ac", "#9575cd", "#aed581", "#ffb74d"];
+const sectionColor = (label) =>
+  label === "-" ? "#555b6b" : SECTION_COLORS[(label.charCodeAt(0) - 65) % SECTION_COLORS.length];
 
 export class AnalysisView {
   constructor(timeline, timing) {
@@ -22,7 +26,10 @@ export class AnalysisView {
     this.data = null;
     this.projectId = null;
     this.showOnsets = true;
+    this.showSections = true;
     timeline.overlays.push((g, v) => this._draw(g, v));
+    timeline.ovOverlays.push((g, v) => this._drawOverview(g, v));
+    $("show-sections").onchange = (e) => { this.showSections = e.target.checked; this.tl.draw(); };
     timing.onChange = () => this._syncWithTiming();
     $("show-onsets").onchange = (e) => { this.showOnsets = e.target.checked; this.tl.draw(); };
     $("btn-reanalyze").onclick = () => this.load(this.timing.project, { force: true });
@@ -41,11 +48,13 @@ export class AnalysisView {
       btn.disabled = false;
       if (this.data) this._summarize();
     }
+    this._sectionsInfo();
   }
 
   async load(project, { force = false } = {}) {
     this.projectId = project.id;
     this.data = null;
+    $("sections-info").textContent = "";
     this.tl.draw();
     const btn = $("btn-reanalyze");
     if (!project.timing?.confirmed) {
@@ -62,6 +71,7 @@ export class AnalysisView {
       if (this.projectId !== project.id) return;
       this.data = d;
       this._summarize();
+      this._sectionsInfo();
     } catch (e) {
       this._info("Analysis failed: " + e.message, "warn-text");
     } finally {
@@ -92,10 +102,67 @@ export class AnalysisView {
     }
   }
 
+  _sectionsInfo() {
+    const el = $("sections-info");
+    const d = this.data;
+    if (!d?.sections?.length || this.timing.dirty) { el.textContent = ""; return; }
+    const seq = d.sections.filter((s) => s.label !== "-").map((s) => s.label).join(" ");
+    el.textContent = `Sections: ${seq} · preview (demo) from ${fmtTime(d.demo.seek).slice(0, 5)}`;
+  }
+
   _info(text, cls) {
     const el = $("analysis-info");
     el.textContent = text;
     el.className = "small " + (cls || "hint");
+  }
+
+  _drawSections(g, { w, h, rulerH, tl, beat, tAt }) {
+    const d = this.data;
+    const bandY = rulerH + 17, bandH = 15;   // below the bar-number tags
+    g.font = "11px ui-monospace, Consolas, monospace";
+    g.textBaseline = "middle";
+    for (const s of d.sections) {
+      const x0 = tl.timeToX(tAt(d.k_start + 4 * s.start_bar));
+      const x1 = tl.timeToX(tAt(d.k_start + 4 * s.end_bar));
+      if (x1 < 0 || x0 > w) continue;
+      const c = sectionColor(s.label);
+      g.globalAlpha = 0.85; g.fillStyle = c;
+      g.fillRect(x0 + 1, bandY, Math.max(1, x1 - x0 - 2), bandH);
+      g.globalAlpha = 1;
+      const text = s.label === "-" ? "silence" : `${s.label} · ${s.level}`;
+      if (x1 - x0 > g.measureText(text).width + 10) {
+        g.fillStyle = "#0d0e11";
+        g.fillText(text, Math.max(x0, 0) + 5, bandY + bandH / 2 + 1);
+      }
+    }
+    // energy line (0-100) through bar centres, in the space between band and lanes
+    const top = bandY + bandH + 6, bottom = h - 3 * LANE_H - 10;
+    if (bottom - top < 20) return;
+    g.strokeStyle = "#ffd54fb0"; g.lineWidth = 1.5;
+    g.beginPath();
+    let started = false;
+    d.energy.forEach((e, b) => {
+      const x = tl.timeToX(tAt(d.k_start + 4 * b + 2));
+      if (x < -50 || x > w + 50) { started = false; return; }
+      const y = bottom - (e / 100) * (bottom - top);
+      if (started) g.lineTo(x, y); else { g.moveTo(x, y); started = true; }
+    });
+    g.stroke();
+    g.lineWidth = 1;
+    g.fillStyle = "#ffd54fb0"; g.textBaseline = "top";
+    g.fillText("energy", w - 48, top);
+  }
+
+  _drawOverview(g, { w, h, k }) {
+    const d = this.data;
+    if (!d?.sections || !this.showSections || this.timing.dirty) return;
+    const beat = 60 / d.bpm;
+    for (const s of d.sections) {
+      const t0 = Math.max(0, d.first + (d.k_start + 4 * s.start_bar) * beat);
+      const t1 = d.first + (d.k_start + 4 * s.end_bar) * beat;
+      g.fillStyle = sectionColor(s.label);
+      g.fillRect(t0 * k + 1, h - 5, Math.max(1, (t1 - t0) * k - 2), 5);
+    }
   }
 
   _draw(g, { w, h, rulerH, tl }) {
@@ -122,6 +189,8 @@ export class AnalysisView {
         }
       }
     }
+
+    if (this.showSections && !stale && d.sections) this._drawSections(g, { w, h, rulerH, tl, beat, tAt });
 
     if (!this.showOnsets) return;
     // onset lanes at the bottom

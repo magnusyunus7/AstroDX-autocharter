@@ -25,6 +25,7 @@ export class Timeline {
     this.playing = false;
     this.markers = [];           // [{t, color, label}]
     this.overlays = [];          // [(g, view) => void]
+    this.ovOverlays = [];        // [(g, {w, h, k}) => void]  drawn on the overview strip
     this.onShiftDrag = null;     // (dtSec, "start" | "move") => void  (Shift+drag moves the grid)
     this._ovCache = null;
     this._bind();
@@ -193,6 +194,7 @@ export class Timeline {
     const dpr = window.devicePixelRatio || 1;
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     const k = w / this.duration;
+    for (const fn of this.ovOverlays) fn(g, { w, h, k });
     g.fillStyle = "#ffffff18"; g.strokeStyle = "#ffffff55";
     g.fillRect(this.start * k, 0, this.viewSec * k, h);
     g.strokeRect(this.start * k + 0.5, 0.5, this.viewSec * k, h - 1);

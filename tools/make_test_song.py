@@ -145,3 +145,88 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ---------------------------------------------------------------- structured songs
+# Each style differs in instruments, chords and loudness, like real sections.
+PROG = {
+    "P1": [[220, 261.6, 329.6], [174.6, 220, 261.6], [196, 246.9, 293.7], [164.8, 207.7, 246.9]],
+    "P2": [[293.7, 370, 440], [246.9, 293.7, 370], [329.6, 415.3, 493.9], [220, 277.2, 329.6]],
+}
+ROOTS = {"P1": [55.0, 43.65, 49.0, 41.2], "P2": [73.4, 61.7, 82.4, 55.0]}
+STYLES = {
+    #          drums   hats   bass   lead   prog   pad_amp
+    "intro":  (None,   "4th", False, False, "P1", 0.05),
+    "verse":  ("half", "8th", True,  False, "P1", 0.035),
+    "chorus": ("full", "16th", True, True,  "P2", 0.045),
+    "break":  (None,   None,  False, False, "P1", 0.06),
+}
+
+
+def riser(dur, sr=SR, rng=None):
+    """Noise sweep getting louder and brighter: the classic build into a drop."""
+    n = int(dur * sr)
+    rng = rng or np.random.default_rng(0)
+    x = rng.standard_normal(n)
+    env = np.linspace(0, 1, n) ** 2
+    hp = np.diff(x, prepend=0) * np.linspace(0.3, 1, n)       # brighter towards the end
+    return 0.25 * (0.5 * x + hp) * env
+
+
+def make_structured(bpm: float, first: float, sections: list[tuple[str, int]], seed: int = 1,
+                    events: list | None = None, transitions: bool = False) -> tuple[np.ndarray, list[int]]:
+    """Render a song from a section plan, e.g. [("intro", 8), ("verse", 8), ("chorus", 8)].
+    Returns (audio, boundary bar indices). Bar 0 starts at `first`.
+    transitions: like real songs, the last bar before each chorus is a fill
+    (16th snare roll + riser) and each section starts with a crash + kick impact."""
+    rng = np.random.default_rng(seed)
+    beat = 60 / bpm
+    bars = sum(n for _, n in sections)
+    y = np.zeros(int((first + bars * 4 * beat + 2.0) * SR) + SR)
+
+    def add(x, t, kind=""):
+        t += rng.uniform(-0.003, 0.003)
+        if events is not None and kind:
+            events.append((t, kind))
+        i = int(round(t * SR))
+        if 0 <= i < len(y):
+            y[i:i + len(x)] += x[: len(y) - i]
+
+    k, s = kick(), snare(rng)
+    boundaries, bar = [], 0
+    for si, (style, n) in enumerate(sections):
+        boundaries.append(bar)
+        drums, hats, bass, lead, prog, pad = STYLES[style]
+        next_style = sections[si + 1][0] if si + 1 < len(sections) else None
+        for i in range(n):
+            t0 = first + bar * 4 * beat
+            if transitions and i == 0 and si > 0:
+                add(hat(rng) * 4, t0); add(k, t0)                     # impact: crash + kick
+            if transitions and i == n - 1 and next_style == "chorus":
+                for j in range(16):                                    # fill bar: snare roll + riser
+                    add(s * (0.4 + 0.6 * j / 15), t0 + j * beat / 4)
+                add(riser(4 * beat, rng=rng), t0)
+                bar += 1
+                continue
+            chord = PROG[prog][bar % 4]
+            for c in chord:
+                add(tone(c, 4 * beat, pad), t0, "chord")
+            for b in range(4):
+                tb = t0 + b * beat
+                if bass:
+                    add(tone(ROOTS[prog][bar % 4], beat * 0.9, 0.2, decay=0.25), tb, "bass")
+                if drums == "full" or (drums == "half" and b in (0, 2)):
+                    add(k, tb, "kick")
+                if drums == "full" and b in (1, 3) or drums == "half" and b == 2:
+                    add(s, tb, "snare")
+                steps = {"4th": [0], "8th": [0.5], "16th": [0, 0.25, 0.5, 0.75]}.get(hats, [])
+                for st in steps:
+                    add(hat(rng), tb + st * beat, "hat")
+                if lead:
+                    for st in (0, 0.5):
+                        note = chord[(b * 2 + int(st * 2)) % 3] * 2
+                        add(tone(note, beat * 0.45, 0.06, decay=0.15), tb + st * beat, "lead")
+            bar += 1
+    boundaries.append(bar)
+    y /= np.abs(y).max() * 1.1
+    return y, boundaries

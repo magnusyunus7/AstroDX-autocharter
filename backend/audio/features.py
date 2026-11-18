@@ -15,7 +15,7 @@ import math
 
 import numpy as np
 
-VERSION = 3
+VERSION = 5
 HOP = 64                  # ~2.9 ms at 22050 Hz
 SUBDIV = 12               # grid points per beat (lcm of 4 and 3)
 STEMS = ("drums", "bass", "melody")
@@ -231,6 +231,8 @@ def analyze(y: np.ndarray, sr: int, bpm: float, first: float) -> dict:
     curves, fps = stem_curves(y, sr)
     g = grid_onsets(curves, fps, bpm, first, duration)
     bars = bar_fit(curves, fps, bpm, first, g["k_start"], g["n_beats"])
+    from backend.audio.structure import analyze_structure
+    struct = analyze_structure(y, sr, bpm, first, g["k_start"], g["n_beats"], g["stems"])
     return {
         "version": VERSION, "bpm": bpm, "first": first,
         "k_start": g["k_start"], "n_beats": g["n_beats"], "subdiv": SUBDIV,
@@ -238,4 +240,5 @@ def analyze(y: np.ndarray, sr: int, bpm: float, first: float) -> dict:
         "stems": {k: np.round(v / 2 * 255).astype(int).tolist() for k, v in g["stems"].items()},
         "bars": bars,
         "summary": drift_summary(bars, bpm, first, g["k_start"]),
+        **struct,                    # energy, sections, demo
     }

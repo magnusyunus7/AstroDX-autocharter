@@ -69,6 +69,7 @@
           <span id="analysis-info" class="small hint"></span>
           <button id="btn-reanalyze" class="small-btn" hidden title="Run the analysis again">Re-analyze</button>
         </div>
+        <p id="sections-info" class="small mono hint"></p>
         <p class="mono hint small" id="decoder-check">Decoder check: waiting for audio…</p>
       </div>
       <div class="timing-help">
@@ -93,6 +94,7 @@
       <span id="time" class="mono">00:00.000 / 00:00.000</span>
       <label class="small">Vol <input id="vol" type="range" min="0" max="1" step="0.01" value="0.8"></label>
       <span class="spacer"></span>
+      <label class="small"><input id="show-sections" type="checkbox" checked> Sections</label>
       <label class="small"><input id="show-onsets" type="checkbox" checked> Onsets</label>
       <label class="small"><input id="follow" type="checkbox" checked> Follow</label>
       <button id="btn-zoom-out" title="Zoom out (-)">−</button>
