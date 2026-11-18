@@ -13,10 +13,22 @@ from __future__ import annotations
 import numpy as np
 
 MIN_SECTION_BARS = 4
-KERNEL_BARS = 4            # novelty kernel half-width (bars)
+KERNEL_BARS = 8            # novelty kernel half-width (units): wide enough that small
+                           # 4-bar variations inside a section average out
+REFINE_KERNEL = 4          # bar-level kernel used to place each boundary on the exact bar
 SAME_LABEL = 0.80          # cosine similarity of section profiles to share a letter
-PHRASE_SNAP = 0.2          # move a boundary 1 bar onto a 4-bar line if the change there
-                           # is at least this fraction of the change at the found bar
+# Choosing the boundary set (dynamic programming over candidate units):
+BOUNDARY_COST = 0.4        # each boundary must "pay" for itself with novelty (0..1)
+PEN_NOT_4 = 0.3            # extra cost: section length not a multiple of 4 units
+PEN_NOT_8 = 0.1            # extra cost: multiple of 4 but not of 8. First/last section exempt.
+                           # (Penalties, not bonuses: a bonus can make splitting free.)
+CAND_MIN = 0.15            # novelty peaks considered (plus their +-1 unit neighbours)
+FAST_BPM = 230             # at/above this, sections are found in 2-bar units (half-time):
+                           # a 314 BPM bar is only 0.76 s
+LABEL_SIM = 0.55           # sections at least this similar (cosine) share a letter
+MAX_LABELS = 8             # keep merging the most similar groups beyond this
+FILL_DROP_DB = 6.0         # a bar whose sub-120 Hz energy (kick + bass fundamentals) is this
+                           # much below the bars on both sides is a fill/riser bar
 LEVELS = ((30, "low"), (55, "mid"), (80, "high"), (101, "peak"))
 DEMO_LEN = 15.0
 
@@ -53,7 +65,17 @@ def bar_features(y, sr, first, k_start, n_beats, beat, stems: dict) -> dict:
     pts = len(total) // n_bars if n_bars else 1
     for b in range(n_bars):
         act[b] = total[b * pts:(b + 1) * pts].mean()
-    return {"loud": loud, "activity": act, "profile": prof}
+    # sub-120 Hz energy per bar (dB): kick and bass fundamentals. Snare rolls
+    # and risers have little energy down here, so fills show up as dips.
+    S = np.abs(librosa.stft(y, n_fft=4096, hop_length=1024)) ** 2
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=4096)
+    sub = S[(freqs >= 30) & (freqs < 120)].sum(axis=0)
+    low_end = np.full(n_bars, -100.0)
+    for b, (a, z) in enumerate(_bar_slices(n_bars, first, k_start, beat, sr, len(y))):
+        fa, fz = a // 1024, max(a // 1024 + 1, z // 1024)
+        if z - a >= 1024:
+            low_end[b] = 10 * np.log10(sub[fa:fz].mean() + 1e-10)
+    return {"loud": loud, "activity": act, "profile": prof, "low_end": low_end}
 
 
 def _norm01(x, lo_pct=5, hi_pct=95):
@@ -61,11 +83,14 @@ def _norm01(x, lo_pct=5, hi_pct=95):
     return np.clip((x - lo) / (hi - lo + 1e-9), 0, 1)
 
 
-def energy_curve(feats: dict) -> np.ndarray:
+def energy_curve(feats: dict, smooth: bool = True) -> np.ndarray:
+    """0-100 per bar. Smoothed for display/density; unsmoothed for section
+    detection (smoothing leaks a section change one bar backwards)."""
     loud = feats["loud"].copy()
     silent = loud <= -79
     e = 0.55 * _norm01(loud) + 0.45 * _norm01(feats["activity"])
-    e = np.convolve(np.pad(e, 1, mode="edge"), [0.25, 0.5, 0.25], mode="valid")
+    if smooth:
+        e = np.convolve(np.pad(e, 1, mode="edge"), [0.25, 0.5, 0.25], mode="valid")
     e[silent] = 0
     return np.round(e * 100).astype(int)
 
@@ -86,52 +111,85 @@ def _novelty(F: np.ndarray, half: int) -> np.ndarray:
     for i in range(n):
         nov[i] = (Sp[i:i + 2 * half, i:i + 2 * half] * K).sum()
     nov = np.maximum(nov, 0)
-    return nov / (nov.max() + 1e-9)
+    # scale by a high percentile, not the max: one huge change (e.g. a
+    # breakdown) shouldn't shrink every other boundary below the cost
+    ref = np.percentile(nov, 95) if len(nov) > 20 else nov.max()
+    return np.clip(nov / (ref + 1e-9), 0, 1.5)
 
 
-def find_sections(feats: dict, energy: np.ndarray, phase: int) -> list[int]:
-    """Boundary bar indices (including 0 and n). `phase` = analysis-bar index
-    of bar 1, so phrase lines (bar 1, 5, 9...) are at bars b with (b - phase) % 4 == 0."""
+def find_sections(feats: dict, energy: np.ndarray, phase: int = 0) -> list[int]:
+    """Boundary bar indices (including 0 and n).
+
+    Picks the whole set of boundaries at once: strong changes (novelty), plus
+    a bonus when consecutive boundaries are a multiple of 4/8 bars apart
+    (sections are 4/8/16 bars long, wherever the phrases start), minus a cost
+    per boundary. This fixes one-bar errors (a fill/riser bar before a drop
+    sounds different already; a held tail hides a section's first bar) without
+    assuming phrases start at bar 1. `phase` is unused (kept for callers)."""
     prof = feats["profile"]
     n = len(prof)
     if n < 2 * MIN_SECTION_BARS:
         return [0, n]
-    # standardize each dimension; add energy so energy jumps count as changes
     F = np.column_stack([prof, energy[:, None] / 25.0])
     active = energy > 0
     mu, sd = F[active].mean(axis=0), F[active].std(axis=0) + 1e-6
     F = (F - mu) / sd
     nov = _novelty(F, KERNEL_BARS)
-    # prefer phrase lines: 8-bar lines most, then 4-bar lines
-    weight = np.array([1.35 if (b - phase) % 8 == 0 else 1.15 if (b - phase) % 4 == 0 else 1.0
-                       for b in range(n)])
-    score = nov * weight
-    thr = max(0.25, float(np.mean(score) + 0.6 * np.std(score)))
-    cands = [b for b in range(1, n) if score[b] >= thr
-             and score[b] >= score[max(0, b - 1)] and score[b] >= score[min(n - 1, b + 1)]]
-    # greedy by strength with a minimum section length
-    chosen = []
-    for b in sorted(cands, key=lambda b: -score[b]):
-        if all(abs(b - c) >= MIN_SECTION_BARS for c in chosen) and b >= MIN_SECTION_BARS \
-                and n - b >= MIN_SECTION_BARS // 2:
-            chosen.append(b)
-    # One-bar errors: a fill/riser bar before a drop already sounds different
-    # (found one bar early), or a held tail hides the new section's first bar
-    # (one bar late). Sections start on 4-bar lines counted from beat 1, so a
-    # boundary right beside a line moves onto it if the change there is real.
-    # Boundaries 2 bars from a line (genuine 6/10-bar sections) stay put.
-    def snap(c):
-        off = (c - phase) % 4
-        if off == 1:
-            line = c - 1
-        elif off == 3:
-            line = c + 1
-        else:
-            return c
-        ok = 1 <= line < n and nov[line] >= PHRASE_SNAP * nov[c]
-        return line if ok else c
 
-    chosen = sorted({snap(c) for c in chosen})
+    # Fill/riser bars: the kick and bass usually drop out for the transition
+    # bar and come back on the drop. A section never starts on such a bar (it
+    # ends the previous section), so it's replaced by the bar after it before
+    # the boundary set is chosen.
+    low = feats.get("low_end")
+
+    def is_fill(c):
+        return low is not None and _is_fill(low, c, active)
+
+    peaks = [b for b in range(1, n) if nov[b] >= CAND_MIN
+             and nov[b] >= nov[b - 1] and nov[b] >= nov[min(n - 1, b + 1)]]
+    cands = set()
+    for b in peaks:
+        for c in (b - 1, b, b + 1):
+            if 1 <= c < n:
+                cands.add(_past_fills(low, c, n, active=active) if low is not None else c)
+    # a boundary moved off a fill keeps the fill's (stronger) novelty
+    nov = nov.copy()
+    for c in range(1, n - 1):
+        if is_fill(c):
+            d = _past_fills(low, c, n, active=active)
+            nov[d] = max(nov[d], nov[c])
+    cands = sorted(cands)
+    pts = [0] + cands + [n]
+
+    def length_pen(length, first_or_last):
+        if first_or_last:
+            return 0.0
+        return 0.0 if length % 8 == 0 else PEN_NOT_8 if length % 4 == 0 else PEN_NOT_4
+
+    # best[j] = best score of a segmentation of [0, pts[j]] ending with a boundary at pts[j]
+    best = [-np.inf] * len(pts)
+    prev = [-1] * len(pts)
+    best[0] = 0.0
+    for j in range(1, len(pts)):
+        cj = pts[j]
+        gain = 0.0 if cj == n else nov[cj] - BOUNDARY_COST
+        for i in range(j):
+            ci = pts[i]
+            if best[i] == -np.inf:
+                continue
+            length = cj - ci
+            if length < MIN_SECTION_BARS and not (cj == n and length >= MIN_SECTION_BARS // 2):
+                continue
+            sc = best[i] + gain - length_pen(length, ci == 0 or cj == n)
+            if sc > best[j]:
+                best[j], prev[j] = sc, i
+    chosen, j = [], len(pts) - 1
+    while j > 0:
+        chosen.append(pts[j])
+        j = prev[j]
+        if j == -1:
+            break
+    chosen = [c for c in chosen if c != n]
 
     # music start/end: silent lead-in and tail become their own edges
     nz = np.nonzero(active)[0]
@@ -143,35 +201,49 @@ def find_sections(feats: dict, energy: np.ndarray, phase: int) -> list[int]:
 
 
 def label_sections(feats: dict, energy: np.ndarray, bounds: list[int]) -> list[dict]:
+    """Letters by similarity, grouped over the whole song: average-linkage
+    merging of section profiles while groups are at least LABEL_SIM similar,
+    then keep merging the closest groups until there are <= MAX_LABELS.
+    Letters are assigned in order of first appearance."""
     prof = feats["profile"]
     active = energy > 0
     mu, sd = prof[active].mean(axis=0), prof[active].std(axis=0) + 1e-6
     P = (prof - mu) / sd
-    protos: list[tuple[str, np.ndarray]] = []
-    out = []
+    segs, vecs = [], []
     for a, z in zip(bounds[:-1], bounds[1:]):
         seg_e = energy[a:z]
         mean_e = float(seg_e.mean()) if len(seg_e) else 0.0
         level = next(name for lim, name in LEVELS if mean_e < lim)
-        if not active[a:z].any():
-            out.append({"start_bar": a, "end_bar": z, "label": "-", "level": "silent",
-                        "energy": 0})
-            continue
-        v = P[a:z][active[a:z]].mean(axis=0)
-        v = v / (np.linalg.norm(v) + 1e-9)
-        best, best_sim = None, -1.0
-        for name, p in protos:
-            sim = float(v @ p)
-            if sim > best_sim:
-                best, best_sim = name, sim
-        if best is not None and best_sim >= SAME_LABEL:
-            label = best
+        silent = not active[a:z].any()
+        segs.append({"start_bar": a, "end_bar": z, "label": "-", "level": "silent" if silent else level,
+                     "energy": 0 if silent else round(mean_e)})
+        if silent:
+            vecs.append(None)
         else:
-            label = chr(ord("A") + len(protos)) if len(protos) < 26 else "?"
-            protos.append((label, v))
-        out.append({"start_bar": a, "end_bar": z, "label": label, "level": level,
-                    "energy": round(mean_e)})
-    return out
+            v = P[a:z][active[a:z]].mean(axis=0)
+            vecs.append(v / (np.linalg.norm(v) + 1e-9))
+    idx = [i for i, v in enumerate(vecs) if v is not None]
+    groups = [[i] for i in idx]
+
+    def gsim(g1, g2):
+        return float(np.mean([vecs[i] @ vecs[j] for i in g1 for j in g2]))
+
+    while len(groups) > 1:
+        best, pair = -2.0, None
+        for x in range(len(groups)):
+            for y in range(x + 1, len(groups)):
+                sim = gsim(groups[x], groups[y])
+                if sim > best:
+                    best, pair = sim, (x, y)
+        if best < LABEL_SIM and len(groups) <= MAX_LABELS:
+            break
+        x, y = pair
+        groups[x] += groups.pop(y)
+    order = sorted(groups, key=min)
+    for k, g in enumerate(order):
+        for i in g:
+            segs[i]["label"] = chr(ord("A") + k)
+    return segs
 
 
 def demo_window(sections: list[dict], first, k_start, beat, duration) -> dict:
@@ -190,12 +262,84 @@ def demo_window(sections: list[dict], first, k_start, beat, duration) -> dict:
     return {"seek": round(min(t, max(0.0, duration - DEMO_LEN)), 2), "len": DEMO_LEN}
 
 
+def _bar_novelty(feats, energy):
+    F = np.column_stack([feats["profile"], energy[:, None] / 25.0])
+    active = energy > 0
+    if active.sum() < 2:
+        return np.zeros(len(energy))
+    F = (F - F[active].mean(axis=0)) / (F[active].std(axis=0) + 1e-6)
+    return _novelty(F, REFINE_KERNEL)
+
+
+def _is_fill(low, c, active=None):
+    """Transition bar: far less sub-bass than the bars after it (kick and bass
+    come back on the drop) and not more than the bars before it (so also a
+    fill coming out of a bass-less breakdown)."""
+    before, after = low[max(0, c - 3):c], low[c + 1:c + 4]
+    if len(before) == 0 or len(after) == 0:
+        return False
+    # a fill sits *between* sections: the bar before it must have music
+    # (the first bar after silence is just the song starting)
+    if active is not None and not active[c - 1]:
+        return False
+    gap = np.median(after) - low[c]
+    # far below what follows (a riser out of a breakdown can still have some
+    # low end, but nowhere near the drop), or below what follows and not
+    # above what came before (kick/bass drop out for the fill)
+    return gap > 2 * FILL_DROP_DB or (gap > FILL_DROP_DB and low[c] <= np.median(before) + 3.0)
+
+
+def _past_fills(low, c, n, max_steps=2, active=None):
+    """Move forward past up to `max_steps` consecutive fill bars."""
+    for _ in range(max_steps):
+        if c + 1 < n and _is_fill(low, c, active):
+            c += 1
+        else:
+            break
+    return c
+
+
+def _refine_to_bars(feats, energy, bars: list[int], unit: int) -> list[int]:
+    """Place each boundary (found on a coarser scale) on the exact bar: the bar
+    within +-unit with the strongest bar-level change, never on a fill bar."""
+    n = len(energy)
+    nov = _bar_novelty(feats, energy)
+    low = feats["low_end"]
+    out = {0, n}
+    for b in bars:
+        if b <= 0 or b >= n:
+            continue
+        options = [c for c in range(b - unit, b + unit + 1) if 1 <= c < n]
+        options = [_past_fills(low, c, n, active=energy > 0) for c in options]
+        out.add(max(options, key=lambda c: nov[c]))
+    return sorted(out)
+
+
+def _to_units(feats: dict, energy: np.ndarray, unit: int):
+    """Average consecutive bars into units of `unit` bars (half-time view of
+    very fast songs). Units start at analysis bar 0."""
+    if unit == 1:
+        return feats, energy
+    n = len(energy)
+    m = (n + unit - 1) // unit
+    def agg(x, fn=np.mean):
+        return np.array([fn(x[i * unit:(i + 1) * unit], axis=0) for i in range(m)])
+    out = {"loud": agg(feats["loud"]), "activity": agg(feats["activity"]),
+           "profile": agg(feats["profile"]), "low_end": agg(feats["low_end"])}
+    return out, np.round(agg(energy.astype(float))).astype(int)
+
+
 def analyze_structure(y, sr, bpm, first, k_start, n_beats, stems) -> dict:
     beat = 60.0 / bpm
     feats = bar_features(y, sr, first, k_start, n_beats, beat, stems)
     energy = energy_curve(feats)
     phase = -k_start // 4            # analysis bar index of UI bar 1
-    bounds = find_sections(feats, energy, phase)
+    unit = 2 if bpm >= FAST_BPM else 1
+    ufeats, uenergy = _to_units(feats, energy_curve(feats, smooth=False), unit)
+    ubounds = find_sections(ufeats, uenergy, phase // unit)
+    n = len(energy)
+    bounds = _refine_to_bars(feats, energy_curve(feats, smooth=False),
+                             [b * unit for b in ubounds], unit)
     sections = label_sections(feats, energy, bounds)
     return {"energy": energy.tolist(), "sections": sections,
             "demo": demo_window(sections, first, k_start, beat, len(y) / sr)}

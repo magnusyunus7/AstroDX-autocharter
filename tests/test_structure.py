@@ -9,9 +9,10 @@ from backend.audio import features, loader
 pytestmark = pytest.mark.skipif(shutil.which(config.FFMPEG) is None, reason="ffmpeg missing")
 
 
-def analyze_plan(tmp_path, plan, bpm=160, first=1.0, seed=50, transitions=False):
+def analyze_plan(tmp_path, plan, bpm=160, first=1.0, seed=50, transitions=False, variation=False):
     from tools.make_test_song import make_structured, write_mp3
-    y44, truth = make_structured(bpm, first, plan, seed=seed, transitions=transitions)
+    y44, truth = make_structured(bpm, first, plan, seed=seed, transitions=transitions,
+                                 variation=variation)
     mp3, wav = tmp_path / "s.mp3", tmp_path / "s.wav"
     write_mp3(y44, mp3)
     loader.make_analysis_wav(mp3, wav)
@@ -52,3 +53,29 @@ def test_fill_bars_dont_pull_boundaries_one_bar_early(tmp_path):
     a, truth, shift = analyze_plan(tmp_path, plan, seed=62, transitions=True)
     found = {s["start_bar"] - shift for s in a["sections"]}
     assert set(truth[1:-1]) <= found
+
+
+def test_phrases_not_starting_on_bar_1(tmp_path):
+    # a 5-bar intro shifts every later phrase: sections start on bars 5, 13, 21...
+    # (the earlier "snap to 4-bar lines from bar 1" rule put all of them a bar off)
+    plan = [("intro", 5), ("verse", 8), ("chorus", 8), ("break", 4), ("verse", 8), ("chorus", 8)]
+    a, truth, shift = analyze_plan(tmp_path, plan, seed=70, transitions=True)
+    inner = {s["start_bar"] - shift for s in a["sections"]} - {0}
+    assert set(truth[1:-1]) <= inner
+    # and no cuts in the middle of a section
+    assert all(min(abs(f - t) for t in truth) <= 1 for f in inner if 0 < f < truth[-1])
+
+
+def test_fast_song_with_variation_isnt_cut_up(tmp_path):
+    # RONDO-like: 314 BPM (a bar is 0.76 s), long sections that change a little
+    # every 4 bars. Must give the real sections, not a cut every 4-8 bars, and
+    # a handful of letters (an earlier version produced 36 sections and ran
+    # out of letters).
+    plan = [("intro", 16), ("verse", 32), ("chorus", 32), ("break", 16), ("chorus", 32)]
+    a, truth, shift = analyze_plan(tmp_path, plan, bpm=314, seed=86, transitions=True,
+                                   variation=True)
+    inner = {s["start_bar"] - shift for s in a["sections"]} - {0}
+    assert set(truth[1:-1]) <= inner
+    assert all(min(abs(f - t) for t in truth) <= 1 for f in inner if 0 < f < truth[-1])
+    letters = {s["label"] for s in a["sections"] if s["label"] != "-"}
+    assert len(letters) <= 6
