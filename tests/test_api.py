@@ -128,3 +128,12 @@ def test_analyze_requires_confirmed_timing_and_caches(client, tmp_path):
     assert client.post(f"/api/projects/{pid}/analyze").json() == d          # cached
     client.put(f"/api/projects/{pid}/timing", json={"bpm": 150, "first": 1.4})
     assert client.post(f"/api/projects/{pid}/analyze").json()["first"] == 1.4  # redone
+
+
+def test_section_level_override(client, mp3):
+    pid = upload(client, mp3).json()["id"]
+    r = client.put(f"/api/projects/{pid}/sections/12/level", json={"level": "peak"})
+    assert r.status_code == 200 and r.json()["section_levels"] == {"12": "peak"}
+    assert client.put(f"/api/projects/{pid}/sections/12/level", json={"level": "loud"}).status_code == 400
+    r = client.put(f"/api/projects/{pid}/sections/12/level", json={"level": None})
+    assert r.json()["section_levels"] == {}

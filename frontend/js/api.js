@@ -27,6 +27,8 @@ export const api = {
     (await req("POST", `/api/projects/${id}/detect-timing${force ? "?force=true" : ""}`)).json(),
   analyze: async (id, force = false) =>
     (await req("POST", `/api/projects/${id}/analyze${force ? "?force=true" : ""}`)).json(),
+  setSectionLevel: async (id, startBar, level) =>
+    (await req("PUT", `/api/projects/${id}/sections/${startBar}/level`, { level })).json(),
   putTiming: async (id, timing) => (await req("PUT", `/api/projects/${id}/timing`, timing)).json(),
 
   trackUrl: (id) => `/api/projects/${id}/track.mp3`,

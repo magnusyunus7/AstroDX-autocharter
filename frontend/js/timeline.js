@@ -27,6 +27,7 @@ export class Timeline {
     this.overlays = [];          // [(g, view) => void]
     this.ovOverlays = [];        // [(g, {w, h, k}) => void]  drawn on the overview strip
     this.onShiftDrag = null;     // (dtSec, "start" | "move") => void  (Shift+drag moves the grid)
+    this.onClickAt = null;       // (x, y) => true if the click was handled (else: seek)
     this._ovCache = null;
     this._bind();
     new ResizeObserver(() => { this._ovCache = null; this.draw(); }).observe(this.wave);
@@ -231,7 +232,9 @@ export class Timeline {
       else { this.start = drag.start - dx / this.pxPerSec; this._clamp(); this.draw(); }
     });
     wv.addEventListener("pointerup", (e) => {
-      if (drag && !drag.moved) this.onSeek(Math.max(0, Math.min(this.duration, this.xToTime(e.offsetX))));
+      if (drag && !drag.moved && !(this.onClickAt && this.onClickAt(e.offsetX, e.offsetY))) {
+        this.onSeek(Math.max(0, Math.min(this.duration, this.xToTime(e.offsetX))));
+      }
       drag = null; wv.classList.remove("dragging");
     });
 

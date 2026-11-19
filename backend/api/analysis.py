@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import json
 
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from backend import storage
 from backend.api.projects import get_project_or_404
@@ -42,6 +45,28 @@ def detect_timing(pid: str, force: bool = False, separate: bool = True) -> dict:
     data["timing"] = result
     save_analysis(pid, data)
     return result
+
+
+LEVELS = ("low", "mid", "high", "peak")
+
+
+class LevelIn(BaseModel):
+    level: Optional[str] = None      # None = back to the automatic level
+
+
+@router.put("/projects/{pid}/sections/{start_bar}/level")
+def set_section_level(pid: str, start_bar: int, body: LevelIn):
+    """Override one section's level (the generator follows it)."""
+    p = get_project_or_404(pid)
+    if body.level is not None and body.level not in LEVELS:
+        raise HTTPException(400, f"level must be one of {LEVELS} or null")
+    key = str(start_bar)
+    if body.level is None:
+        p.section_levels.pop(key, None)
+    else:
+        p.section_levels[key] = body.level
+    storage.save_project(p)
+    return p
 
 
 @router.post("/projects/{pid}/analyze")

@@ -30,10 +30,13 @@ LABEL_SIM = 0.55           # sections at least this similar (cosine) share a let
 MAX_LABELS = 8             # keep merging the most similar groups beyond this
 FILL_DROP_DB = 6.0         # a bar whose sub-120 Hz energy (kick + bass fundamentals) is this
                            # much below the bars on both sides is a fill/riser bar
-# Levels are graded against the song's own energy range (most songs are
-# mastered loud, so absolute thresholds put nearly everything in high/peak):
-# percentiles of the song's active bars.
-LEVEL_PCTS = ((20, "low"), (50, "mid"), (80, "high"))   # above the 80th: "peak"
+# Levels compare each section with the song's typical (median) energy, by
+# real difference, not by rank: in a uniformly intense song (e.g. DEVOTION,
+# whose main sections differ by ~3 points) everything main is "high".
+LEVEL_MARGINS = (("low", -22), ("mid", -9), ("peak", 9))   # points vs the song median
+LOUD_SPAN_DB = 12.0        # loudness scale: 0 at 12 dB below the song's loud level.
+                           # Fixed, so a song mastered within 2 dB doesn't get those
+                           # 2 dB stretched across the whole 0-100 range
 DEMO_LEN = 15.0
 
 
@@ -92,7 +95,11 @@ def energy_curve(feats: dict, smooth: bool = True) -> np.ndarray:
     detection (smoothing leaks a section change one bar backwards)."""
     loud = feats["loud"].copy()
     silent = loud <= -79
-    e = 0.55 * _norm01(loud) + 0.45 * _norm01(feats["activity"])
+    top = np.percentile(loud[~silent], 95) if (~silent).any() else 0.0
+    loud_fixed = np.clip(1 - (top - loud) / LOUD_SPAN_DB, 0, 1)
+    # 65% loudness / 35% activity: best match with real charts (0.525) that
+    # still keeps a noisy-but-calm intro below the main part (AFTER PANDORA)
+    e = 0.65 * loud_fixed + 0.35 * _norm01(feats["activity"])
     if smooth:
         e = np.convolve(np.pad(e, 1, mode="edge"), [0.25, 0.5, 0.25], mode="valid")
     e[silent] = 0
@@ -226,14 +233,16 @@ def label_sections(feats: dict, energy: np.ndarray, bounds: list[int]) -> list[d
         else:
             v = P[a:z][active[a:z]].mean(axis=0)
             vecs.append(v / (np.linalg.norm(v) + 1e-9))
-    # grade levels against this song's own sections: rank section energies,
-    # weighted by length (each bar carries its section's mean)
-    graded = [sg for sg in segs if sg["level"] != "silent"]
-    if graded:
-        per_bar = np.concatenate([[sg["energy"]] * (sg["end_bar"] - sg["start_bar"]) for sg in graded])
-        cuts = [(np.percentile(per_bar, p), name) for p, name in LEVEL_PCTS]
-        for sg in graded:
-            sg["level"] = next((name for lim, name in cuts if sg["energy"] < lim), "peak")
+    # grade each section by how far it is from the song's typical energy
+    if active.any():
+        typical = float(np.median(energy[active]))
+        lo, mid, pk = (m for _, m in LEVEL_MARGINS)
+        for sg in segs:
+            if sg["level"] == "silent":
+                continue
+            diff = sg["energy"] - typical
+            sg["level"] = ("low" if diff < lo else "mid" if diff < mid
+                           else "peak" if diff >= pk else "high")
     idx = [i for i, v in enumerate(vecs) if v is not None]
     groups = [[i] for i in idx]
 

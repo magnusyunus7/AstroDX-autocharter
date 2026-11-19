@@ -27,6 +27,9 @@ export class AnalysisView {
     this.projectId = null;
     this.showOnsets = true;
     this.showSections = true;
+    this.project = null;
+    this.band = null;              // {y0, y1} of the section band, for click hit-testing
+    timeline.onClickAt = (x, y) => this._clickBand(x, y);
     timeline.overlays.push((g, v) => this._draw(g, v));
     timeline.ovOverlays.push((g, v) => this._drawOverview(g, v));
     $("show-sections").onchange = (e) => { this.showSections = e.target.checked; this.tl.draw(); };
@@ -51,7 +54,34 @@ export class AnalysisView {
     this._sectionsInfo();
   }
 
+  /** Level shown for a section: the user's override, else the automatic one. */
+  levelOf(s) { return this.project?.section_levels?.[String(s.start_bar)] ?? s.level; }
+  isOverridden(s) { return String(s.start_bar) in (this.project?.section_levels ?? {}); }
+
+  /** Click on a section block: cycle auto -> low -> mid -> high -> peak -> auto. */
+  _clickBand(x, y) {
+    const d = this.data;
+    if (!d?.sections || !this.band || !this.showSections || this.timing.dirty) return false;
+    if (y < this.band.y0 || y > this.band.y1) return false;
+    const beat = 60 / d.bpm;
+    const t = this.tl.xToTime(x);
+    const s = d.sections.find((s) => t >= d.first + (d.k_start + 4 * s.start_bar) * beat
+                                   && t < d.first + (d.k_start + 4 * s.end_bar) * beat);
+    if (!s || s.label === "-") return false;
+    // every other level once, then back to automatic. e.g. auto high -> peak -> low -> mid -> auto
+    const order = ["low", "mid", "high", "peak"];
+    const a = order.indexOf(s.level);
+    const seq = [...order.slice(a + 1), ...order.slice(0, a)];
+    const next = !this.isOverridden(s) ? seq[0]
+      : seq[seq.indexOf(this.levelOf(s)) + 1] ?? null;
+    api.setSectionLevel(this.project.id, s.start_bar, next)
+      .then((p) => { this.project = p; this.tl.draw(); })
+      .catch((e) => alert("Couldn't save the level: " + e.message));
+    return true;
+  }
+
   async load(project, { force = false } = {}) {
+    this.project = project;
     this.projectId = project.id;
     this.data = null;
     $("sections-info").textContent = "";
@@ -107,7 +137,8 @@ export class AnalysisView {
     const d = this.data;
     if (!d?.sections?.length || this.timing.dirty) { el.textContent = ""; return; }
     const seq = d.sections.filter((s) => s.label !== "-").map((s) => s.label).join(" ");
-    el.textContent = `Sections: ${seq} · preview (demo) from ${fmtTime(d.demo.seek).slice(0, 5)}`;
+    el.textContent = `Sections: ${seq} · preview (demo) from ${fmtTime(d.demo.seek).slice(0, 5)}` +
+      ` · click a section block to change its level (✎ = yours)`;
   }
 
   _info(text, cls) {
@@ -119,6 +150,7 @@ export class AnalysisView {
   _drawSections(g, { w, h, rulerH, tl, beat, tAt }) {
     const d = this.data;
     const bandY = rulerH + 17, bandH = 15;   // below the bar-number tags
+    this.band = { y0: bandY, y1: bandY + bandH };
     g.font = "11px ui-monospace, Consolas, monospace";
     g.textBaseline = "middle";
     for (const s of d.sections) {
@@ -129,7 +161,8 @@ export class AnalysisView {
       g.globalAlpha = 0.85; g.fillStyle = c;
       g.fillRect(x0 + 1, bandY, Math.max(1, x1 - x0 - 2), bandH);
       g.globalAlpha = 1;
-      const text = s.label === "-" ? "silence" : `${s.label} · ${s.level}`;
+      const text = s.label === "-" ? "silence"
+        : `${s.label} · ${this.levelOf(s)}${this.isOverridden(s) ? " ✎" : ""}`;
       if (x1 - x0 > g.measureText(text).width + 10) {
         g.fillStyle = "#0d0e11";
         g.fillText(text, Math.max(x0, 0) + 5, bandY + bandH / 2 + 1);

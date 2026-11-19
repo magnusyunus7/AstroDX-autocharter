@@ -22,3 +22,6 @@ class Project(BaseModel):
     duration: float             # seconds, from the decoded audio
     jacket: Optional[str] = None  # "bg.jpg" / "bg.png" inside the project folder
     timing: Optional[Timing] = None
+    # user overrides of section levels, keyed by the section's start bar
+    # (analysis bar index as a string). Ignored if no section starts there.
+    section_levels: dict[str, str] = Field(default_factory=dict)

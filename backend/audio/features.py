@@ -15,7 +15,7 @@ import math
 
 import numpy as np
 
-VERSION = 9
+VERSION = 11
 HOP = 64                  # ~2.9 ms at 22050 Hz
 SUBDIV = 12               # grid points per beat (lcm of 4 and 3)
 STEMS = ("drums", "bass", "melody")
