@@ -5,13 +5,14 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from backend import config
-from backend.api import analysis, audio, projects, timing
+from backend.api import analysis, audio, generate, projects, timing
 
 app = FastAPI(title="AstroDX autocharter")
 app.include_router(projects.router, prefix="/api")
 app.include_router(audio.router, prefix="/api")
 app.include_router(timing.router, prefix="/api")
 app.include_router(analysis.router, prefix="/api")
+app.include_router(generate.router, prefix="/api")
 
 
 class NoCacheStatic(StaticFiles):

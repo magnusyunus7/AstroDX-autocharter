@@ -272,13 +272,9 @@ def demo_window(sections: list[dict], first, k_start, beat, duration) -> dict:
     (peak, else high...), e.g. the first chorus rather than a loud verse."""
     if not sections:
         return {"seek": 0.0, "len": DEMO_LEN}
-    for level in ("peak", "high", "mid", "low"):
-        hot = [s for s in sections if s["level"] == level]
-        if hot:
-            pick = hot[0]
-            break
-    else:
-        pick = sections[0]
+    # the most intense section that's long enough to preview (>= 4 bars)
+    long_enough = [s for s in sections if s["end_bar"] - s["start_bar"] >= 4 and s["label"] != "-"]
+    pick = max(long_enough or sections, key=lambda s: s["energy"])
     t = max(0.0, first + (k_start + 4 * pick["start_bar"]) * beat)
     return {"seek": round(min(t, max(0.0, duration - DEMO_LEN)), 2), "len": DEMO_LEN}
 

@@ -54,6 +54,20 @@
       <label>Title <input id="p-title" type="text" autocomplete="off"></label>
       <label>Artist <input id="p-artist" type="text" autocomplete="off"></label>
       <span class="hint mono small" id="p-info"></span>
+      <div class="gen-row">
+        <label>Level <select id="g-level">
+          <option>10</option><option>10+</option><option>11</option><option>11+</option>
+          <option>12</option><option>12+</option><option>13</option><option>13+</option>
+          <option selected>14</option><option>14+</option><option>15</option>
+        </select></label>
+        <label>Difficulty <select id="g-slot">
+          <option value="4">Expert</option><option value="5" selected>Master</option><option value="6">Re:Master</option>
+        </select></label>
+        <button id="g-generate" class="primary" disabled>Generate</button>
+        <button id="g-reroll" disabled title="Same settings, different note choices">Reroll</button>
+        <a id="g-export" class="button disabled" download title="AstroDX-ready zip: maidata.txt + track.mp3 + jacket">Export zip</a>
+        <span id="g-info" class="small hint"></span>
+      </div>
     </section>
 
     <section class="card timing-card">
@@ -95,6 +109,7 @@
       <label class="small">Vol <input id="vol" type="range" min="0" max="1" step="0.01" value="0.8"></label>
       <span class="spacer"></span>
       <label class="small"><input id="show-sections" type="checkbox" checked> Sections</label>
+      <label class="small"><input id="show-notes" type="checkbox" checked> Notes</label>
       <label class="small"><input id="show-onsets" type="checkbox" checked> Onsets</label>
       <label class="small"><input id="follow" type="checkbox" checked> Follow</label>
       <button id="btn-zoom-out" title="Zoom out (-)">−</button>
@@ -119,6 +134,7 @@
       <span class="sep"></span>
       <label class="small"><input id="t-metro" type="checkbox"> Metronome</label>
       <input id="t-metro-vol" type="range" min="0" max="1" step="0.01" value="0.6" title="Metronome volume">
+      <label class="small"><input id="hit-sounds" type="checkbox"> Hit sounds</label>
       <label class="small">Speed
         <select id="t-speed">
           <option value="1">1×</option><option value="0.75">0.75×</option>

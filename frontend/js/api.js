@@ -29,6 +29,9 @@ export const api = {
     (await req("POST", `/api/projects/${id}/analyze${force ? "?force=true" : ""}`)).json(),
   setSectionLevel: async (id, startBar, level) =>
     (await req("PUT", `/api/projects/${id}/sections/${startBar}/level`, { level })).json(),
+  generate: async (id, body) => (await req("POST", `/api/projects/${id}/generate`, body)).json(),
+  lastGenerated: async (id) => (await req("GET", `/api/projects/${id}/generated`)).json(),
+  exportUrl: (id) => `/api/projects/${id}/export.zip`,
   putTiming: async (id, timing) => (await req("PUT", `/api/projects/${id}/timing`, timing)).json(),
 
   trackUrl: (id) => `/api/projects/${id}/track.mp3`,
