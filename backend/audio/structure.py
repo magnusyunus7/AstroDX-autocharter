@@ -16,6 +16,7 @@ MIN_SECTION_BARS = 4
 KERNEL_BARS = 8            # novelty kernel half-width (units): wide enough that small
                            # 4-bar variations inside a section average out
 REFINE_KERNEL = 4          # bar-level kernel used to place each boundary on the exact bar
+JUMP_W = 1.5               # weight of a sudden energy jump when placing a boundary
 SAME_LABEL = 0.80          # cosine similarity of section profiles to share a letter
 # Choosing the boundary set (dynamic programming over candidate units):
 BOUNDARY_COST = 0.4        # each boundary must "pay" for itself with novelty (0..1)
@@ -29,7 +30,10 @@ LABEL_SIM = 0.55           # sections at least this similar (cosine) share a let
 MAX_LABELS = 8             # keep merging the most similar groups beyond this
 FILL_DROP_DB = 6.0         # a bar whose sub-120 Hz energy (kick + bass fundamentals) is this
                            # much below the bars on both sides is a fill/riser bar
-LEVELS = ((30, "low"), (55, "mid"), (80, "high"), (101, "peak"))
+# Levels are graded against the song's own energy range (most songs are
+# mastered loud, so absolute thresholds put nearly everything in high/peak):
+# percentiles of the song's active bars.
+LEVEL_PCTS = ((20, "low"), (50, "mid"), (80, "high"))   # above the 80th: "peak"
 DEMO_LEN = 15.0
 
 
@@ -213,7 +217,7 @@ def label_sections(feats: dict, energy: np.ndarray, bounds: list[int]) -> list[d
     for a, z in zip(bounds[:-1], bounds[1:]):
         seg_e = energy[a:z]
         mean_e = float(seg_e.mean()) if len(seg_e) else 0.0
-        level = next(name for lim, name in LEVELS if mean_e < lim)
+        level = "mid"                    # graded relative to the song below
         silent = not active[a:z].any()
         segs.append({"start_bar": a, "end_bar": z, "label": "-", "level": "silent" if silent else level,
                      "energy": 0 if silent else round(mean_e)})
@@ -222,6 +226,14 @@ def label_sections(feats: dict, energy: np.ndarray, bounds: list[int]) -> list[d
         else:
             v = P[a:z][active[a:z]].mean(axis=0)
             vecs.append(v / (np.linalg.norm(v) + 1e-9))
+    # grade levels against this song's own sections: rank section energies,
+    # weighted by length (each bar carries its section's mean)
+    graded = [sg for sg in segs if sg["level"] != "silent"]
+    if graded:
+        per_bar = np.concatenate([[sg["energy"]] * (sg["end_bar"] - sg["start_bar"]) for sg in graded])
+        cuts = [(np.percentile(per_bar, p), name) for p, name in LEVEL_PCTS]
+        for sg in graded:
+            sg["level"] = next((name for lim, name in cuts if sg["energy"] < lim), "peak")
     idx = [i for i, v in enumerate(vecs) if v is not None]
     groups = [[i] for i in idx]
 
@@ -301,17 +313,24 @@ def _past_fills(low, c, n, max_steps=2, active=None):
 
 def _refine_to_bars(feats, energy, bars: list[int], unit: int) -> list[int]:
     """Place each boundary (found on a coarser scale) on the exact bar: the bar
-    within +-unit with the strongest bar-level change, never on a fill bar."""
+    within +-(unit+1) where the timbre change plus a sudden energy jump (e.g.
+    the drop into a rest, or a drop hitting) is strongest; never on a fill bar."""
     n = len(energy)
     nov = _bar_novelty(feats, energy)
     low = feats["low_end"]
+    e = energy.astype(float) / 100.0
+
+    def jump(c):
+        before, after = e[max(0, c - 2):c], e[c:c + 2]
+        return abs(after.mean() - before.mean()) if len(before) and len(after) else 0.0
+
     out = {0, n}
     for b in bars:
         if b <= 0 or b >= n:
             continue
-        options = [c for c in range(b - unit, b + unit + 1) if 1 <= c < n]
+        options = [c for c in range(b - unit - 1, b + unit + 2) if 1 <= c < n]
         options = [_past_fills(low, c, n, active=energy > 0) for c in options]
-        out.add(max(options, key=lambda c: nov[c]))
+        out.add(max(options, key=lambda c: nov[c] + JUMP_W * jump(c)))
     return sorted(out)
 
 
@@ -329,6 +348,21 @@ def _to_units(feats: dict, energy: np.ndarray, unit: int):
     return out, np.round(agg(energy.astype(float))).astype(int)
 
 
+def _merge_same(sections: list[dict], energy: np.ndarray) -> list[dict]:
+    """Neighbouring sections with the same letter are one section (e.g. a
+    one-bar sliver at the end, or a chorus that the detector split)."""
+    out = []
+    for sg in sections:
+        if out and sg["label"] == out[-1]["label"]:
+            prev = out[-1]
+            prev["end_bar"] = sg["end_bar"]
+            seg = energy[prev["start_bar"]:prev["end_bar"]]
+            prev["energy"] = round(float(seg.mean())) if prev["label"] != "-" else 0
+            continue
+        out.append(dict(sg))
+    return out
+
+
 def analyze_structure(y, sr, bpm, first, k_start, n_beats, stems) -> dict:
     beat = 60.0 / bpm
     feats = bar_features(y, sr, first, k_start, n_beats, beat, stems)
@@ -340,6 +374,6 @@ def analyze_structure(y, sr, bpm, first, k_start, n_beats, stems) -> dict:
     n = len(energy)
     bounds = _refine_to_bars(feats, energy_curve(feats, smooth=False),
                              [b * unit for b in ubounds], unit)
-    sections = label_sections(feats, energy, bounds)
+    sections = _merge_same(label_sections(feats, energy, bounds), energy)
     return {"energy": energy.tolist(), "sections": sections,
             "demo": demo_window(sections, first, k_start, beat, len(y) / sr)}
