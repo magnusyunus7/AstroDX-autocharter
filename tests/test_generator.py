@@ -92,7 +92,21 @@ def test_playability_checker_catches_problems():
     assert any("next to slide" in p for p in check("(200){4}1-5[8:1],,{8},5,E"))  # fast BPM: more than a {4}
     assert check("(170){4}1-5[8:1],,{8},3,E") == []                           # away from the slide: fine
     assert any("next to slide 1>4" in p for p in check("(170){8}1>4[8:1],,,6,3,{4},,E"))
-    assert any("touch" in p for p in check("(170){8}1-5[8:1],B5,{4},,E"))      # touch during a slide
+    assert any("touch" in p for p in check("(170){16}1-5[4:1],,,,,B5,{4},,E"))  # touch while a slide moves
+    # the slide hand's next note right after the slide: from a {8} after its end,
+    # right next to it (not on the end / its start / elsewhere). "Destined Marionette":
+    dm = "(170){16}4/5-7[8:1],,4,,3,,2,,8,3,1,2,8,,5/6,,{16}4-2[8:1],,5,,6,,7,,1,6,8,7,1,,3/4,,{1},,E"
+    assert check(dm) == []
+    pre = "(170){16}4/5-7[8:1],,4,,3,,2,"
+    assert any("needs" in p for p in check(pre + "8,,3,1,2,8,,,,{1},,E"))        # 8 only a {16} after
+    assert any("next to its end" in p for p in check(pre + ",1,2,,,,,,,{1},,E"))  # other hand busy: 2 is the slide hand's
+    assert any("next to slide" in p for p in check(pre + ",5,,,,,,,,{1},,E"))     # back on its start
+    assert any("next to slide" in p for p in check(pre + ",7,,,,,,,,{1},,E"))     # on its end
+    assert any("next to slide 1>4" in p for p in check("(170){8}1>4[8:1],,,6,3,{4},,E"))  # not back on the path
+    # notes as a slide starts moving: one may be its own start button (tap + slide)
+    assert any("free hand" in p for p in check("(170){4}1-4[8:1],2/3,{1},,E"))
+    assert check("(170){4}1-4[8:1],1/8,{1},,E") == []
+    assert check("(170){8}1-5[8:1],2/8,1,{1},,E") == []
     # a held button gets the same room after release
     assert any("after a hold" in p for p in check("(170){16}6h[4:1],1,,,6,{4},,E"))
 
