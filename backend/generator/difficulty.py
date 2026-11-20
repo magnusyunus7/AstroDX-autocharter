@@ -1,9 +1,9 @@
 """Level -> generator targets.
 
-Fitted on 41 real charts (levels 3-14+, tools/chart_stats.py --fit) with
-outliers trimmed: slow, reading-heavy charts like a sparse 14 at 85 BPM are
-real but not what "typical density" should aim for. Smooth in level, so
-levels without sample charts are still sensible and nothing goes backwards.
+Medians per level measured on the community chart collection (backend/
+generator/priors.py, made by tools/make_priors.py from tools/corpus_stats.py),
+interpolated between levels so in-between values are smooth. Touch is from DX
+charts (we write DX); 15 is extrapolated (only a handful of charts).
 
 Level values: "14" -> 14.2 and "14+" -> 14.7 (middle of each band).
 """
@@ -13,20 +13,10 @@ import math
 import re
 from dataclasses import asdict, dataclass
 
-LEVELS = ["10", "10+", "11", "11+", "12", "12+", "13", "13+", "14", "14+", "15"]
+from backend.generator.priors import LEVEL_TABLE
 
-# (a, b, log): value = exp(a + b*L) if log else a + b*L.  Refit with
-# `python -m tools.chart_stats samples/ --fit` when you add more charts.
-FIT = {
-    "nps":            (-1.5564, 0.2421, True),
-    "peak_nps":       (-0.7519, 0.2394, True),
-    "slide_pm":       (-32.2591, 4.7295, False),
-    "each_pct":       (78.6593, -3.6598, False),
-    "hold_pct":       (35.2282, -1.8911, False),
-    "touch_pct":      (11.3122, -0.4186, False),
-    "break_pct":      (17.5859, -0.7912, False),
-    "longest_stream": (-197.7103, 16.4828, False),
-}
+LEVELS = ["10", "10+", "11", "11+", "12", "12+", "13", "13+", "14", "14+", "15"]
+LOG_KEYS = ("nps", "peak_nps")          # interpolated on a log scale
 
 
 def level_value(level: str) -> float:
@@ -34,6 +24,12 @@ def level_value(level: str) -> float:
     if not m:
         raise ValueError(f"bad level {level!r}; use e.g. 13, 13+, 14")
     return int(m.group(1)) + (0.7 if m.group(2) else 0.2)
+
+
+def nearest_level(level: str) -> str:
+    """The table level closest to `level` (for per-level distributions)."""
+    L = level_value(level)
+    return min(LEVELS, key=lambda lv: abs(level_value(lv) - L))
 
 
 @dataclass
@@ -47,26 +43,38 @@ class Targets:
     break_pct: float         # % of notes marked BREAK
     slides_per_min: float
     longest_stream: int      # longest run of fast consecutive notes (0 = none)
+    bursts_pm: float = 0.0   # bursts ({24}/{32} clusters) per minute
 
     def to_dict(self) -> dict:
         return asdict(self)
 
 
-def _f(key: str, L: float) -> float:
-    a, b, log = FIT[key]
-    return math.exp(a + b * L) if log else a + b * L
+def _value(key: str, L: float) -> float:
+    pts = sorted((level_value(lv), LEVEL_TABLE[lv][key]) for lv in LEVELS)
+    if L <= pts[0][0]:
+        return pts[0][1]
+    if L >= pts[-1][0]:
+        return pts[-1][1]
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        if x0 <= L <= x1:
+            f = (L - x0) / (x1 - x0)
+            if key in LOG_KEYS and y0 > 0 and y1 > 0:
+                return math.exp(math.log(y0) + f * (math.log(y1) - math.log(y0)))
+            return y0 + f * (y1 - y0)
+    return pts[-1][1]
 
 
 def targets(level: str) -> Targets:
     L = level_value(level)
     return Targets(
         level=level,
-        nps=round(_f("nps", L), 2),
-        peak_nps=round(_f("peak_nps", L), 2),
-        each_pct=round(max(10.0, _f("each_pct", L)), 1),
-        hold_pct=round(max(3.0, _f("hold_pct", L)), 1),
-        touch_pct=round(max(0.0, _f("touch_pct", L)), 1),
-        break_pct=round(max(2.0, _f("break_pct", L)), 1),
-        slides_per_min=round(max(0.0, _f("slide_pm", L)), 1),
-        longest_stream=max(0, int(round(_f("longest_stream", L)))),
+        nps=round(_value("nps", L), 2),
+        peak_nps=round(_value("peak_nps", L), 2),
+        each_pct=round(_value("each_pct", L), 1),
+        hold_pct=round(_value("hold_pct", L), 1),
+        touch_pct=round(_value("touch_pct", L), 1),
+        break_pct=round(_value("break_pct", L), 1),
+        slides_per_min=round(_value("slides_per_min", L), 1),
+        longest_stream=max(0, int(round(_value("longest_stream", L)))),
+        bursts_pm=round(_value("bursts_pm", L), 2),
     )

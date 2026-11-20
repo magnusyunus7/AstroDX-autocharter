@@ -6,7 +6,8 @@ rest the right hand sits on 1-4 and the left on 5-8.
     charts (fast runs in the sample charts: ~53% to a neighbouring button).
     Runs follow a pattern for a few notes: spin (one direction), wiggle
     (back and forth next door), stairs (2 at a time), trill (two buttons),
-    or free; the step mix matches the sample charts (STEP_PRIOR)
+    or free; the step mix, EACH spacing and slide shapes follow charts of the
+    same level in the community collection (priors.py)
   * a hand can only move so far in the time since its own last note
   * slow notes go to the hand on that side; they may repeat or jump
   * EACH: two buttons 1-4 apart (mirror, neighbours, opposite), near the hands
@@ -28,6 +29,8 @@ from fractions import Fraction
 from dataclasses import dataclass
 
 from backend.checker.playability import next_spots, slide_next_beats, slide_zone
+from backend.generator.difficulty import nearest_level
+from backend.generator.priors import EACH_DIST, SLIDE_SHAPE, STEPS
 from backend.models.chart import ring_distance
 
 RIGHT = [1, 2, 3, 4]
@@ -40,8 +43,7 @@ CW_IS_RIGHT = {1, 2, 7, 8}          # simai: from these, '>' turns clockwise; fr
 MIRROR_SHAPE = {">": "<", "<": ">", "p": "q", "q": "p", "-": "-", "v": "v", "w": "w"}
 
 # slide shape weights; arcs by how many buttons they pass (charts mostly use 3)
-SHAPE_WEIGHT = {"-": 0.55, "arc": 0.25, "v": 0.10, "p": 0.04, "w": 0.04}
-ARC_STEPS = {1: 0.1, 2: 0.4, 3: 1.0, 4: 0.5, 5: 0.3, 6: 0.2, 7: 0.3}
+ENDS_AT = {1: 2, 2: 2, 3: 2, 4: 1}   # buttons at each ring distance from a start
 
 
 @dataclass
@@ -64,10 +66,15 @@ def _cw_steps(a: int, b: int) -> int:
 
 
 def slide_options(start: int, half: list[int], restricted: bool, long: bool,
-                  allow_wifi: bool) -> list[tuple[float, str, int]]:
-    """(weight, shape, end) for slides from `start`. Every shape works at [8:1]
-    (charts do 3-button arcs and full straights that fast); the long ones
-    (loops, wifi, 5+ button arcs) need a longer slide."""
+                  allow_wifi: bool, shapes: dict | None = None) -> list[tuple[float, str, int]]:
+    """(weight, shape, end) for slides from `start`, weighted like charts at
+    this level (`shapes`: priors.SLIDE_SHAPE[level]). Every shape works at
+    [8:1]; the long ones (loops, wifi, 5+ button arcs) need a longer slide.
+    Straights and curves cover at least 2 buttons."""
+    s = shapes or {}
+    arc = {kk: s.get(f"arc{kk}", 0.0) for kk in range(2, 8)}
+    for kk in (2, 3):                                 # '^' is the short way round
+        arc[kk] += s.get("^", 0.0) / 2
     opts = []
     for end in range(1, 9):
         if end == start:
@@ -76,23 +83,24 @@ def slide_options(start: int, half: list[int], restricted: bool, long: bool,
             continue
         d = ring_distance(start, end)
         if d >= 2:
-            opts.append((SHAPE_WEIGHT["-"] / 3, "-", end))
+            opts.append((s.get(f"-{d}", 0.1) / ENDS_AT[d], "-", end))
         if 1 <= d <= 3:
-            opts.append((SHAPE_WEIGHT["v"] / 3, "v", end))
+            opts.append(((s.get("v", 0.03) + s.get("V", 0.0)) / 6, "v", end))
         for cw in (True, False):
             k = _cw_steps(start, end) if cw else _cw_steps(end, start)
-            path = [(start - 1 + (s if cw else -s)) % 8 + 1 for s in range(1, k + 1)]
+            path = [(start - 1 + (st if cw else -st)) % 8 + 1 for st in range(1, k + 1)]
             if restricted and any(b not in half for b in path):
                 continue
             if k < 2:
                 continue                             # a curve passes at least 2 buttons (1<7, not 1<8)
             if k <= 4 or long:
-                opts.append((SHAPE_WEIGHT["arc"] * ARC_STEPS[k] / 4, _arc(start, end, cw), end))
+                opts.append((arc.get(k, 0.01) or 0.01, _arc(start, end, cw), end))
         if not restricted and d >= 2 and long:
-            opts.append((SHAPE_WEIGHT["p"] / 4, "p" if (start + end) % 2 else "q", end))
+            pq = s.get("p", 0.02) + s.get("q", 0.02)
+            opts.append((pq / 7, "p" if (start + end) % 2 else "q", end))
         if not restricted and allow_wifi and d == 4 and long:
-            opts.append((SHAPE_WEIGHT["w"], "w", end))
-    return opts
+            opts.append((s.get("w", 0.02), "w", end))
+    return [o for o in opts if o[0] > 0]
 
 
 def _pick(opts, rng):
@@ -112,18 +120,11 @@ def _touch_sensor(button: int, strong: bool, rng: random.Random) -> str:
     return ("B" if r < 0.6 else "E") + str(button)
 
 
-# step (next button - previous, -4..3) mix by gap between notes, from the sample charts
-STEP_PRIOR = {
-    "fast": {0: .06, 1: .30, -1: .23, 2: .12, -2: .11, 3: .055, -3: .058, -4: .068},   # < 0.13 s
-    "mid": {0: .21, 1: .16, -1: .18, 2: .12, -2: .12, 3: .08, -3: .07, -4: .05},       # < 0.20 s
-    "slow": {0: .19, 1: .18, -1: .19, 2: .10, -2: .12, 3: .07, -3: .05, -4: .09},
-}
 FAST_RUN_SEC = 0.13
 # patterns for fast runs: (weight, name)
 PATTERNS = ((0.40, "spin"), (0.18, "wiggle"), (0.10, "stairs"), (0.10, "trill"), (0.22, "free"))
 PATTERN_LEN = (6, 12)               # notes before picking a new pattern
 PATTERN_BOOST = 30.0                # how strongly a run follows its pattern
-EACH_DIST = {1: .23, 2: .29, 3: .24, 4: .23}   # ring distance between EACH buttons
 # slower notes (not in fast runs) follow simple patterns too: (weight, name)
 SLOW_PATTERNS = ((0.35, "alternate"), (0.25, "walk"), (0.10, "repeat"), (0.30, "free"))
 SLOW_BOOST = 6.0
@@ -173,12 +174,14 @@ def _between(a: int, b: int, x: int) -> bool:
 
 def assign(times: list[float], each: list[bool], seed: int = 0, kinds=None,
            beat: float = 0.5, allow_wifi: bool = False, strong=None,
-           clear_sec: float = 0.0, beats=None) -> list[list[Placed]]:
+           clear_sec: float = 0.0, beats=None, level: str = "14") -> list[list[Placed]]:
     """One list of Placed per moment (empty: no safe button, leave it out).
     `kinds` (from kinds.decide) adds holds, slides and touch; without it every
     note is a tap. clear_sec: room a held button gets after the hold ends.
     beats: chart beat of each moment (enables repeating bar patterns)."""
     rng = random.Random(seed)
+    lv = nearest_level(level)
+    step_prior, each_dist, shapes = STEPS[lv], EACH_DIST[lv], SLIDE_SHAPE[lv]
     next_sec = slide_next_beats(60.0 / beat) * beat   # slide hand's soonest next note
     at = {"R": 2, "L": 7}           # each hand's button
     hand_t = {"R": -1e9, "L": -1e9}  # each hand's last note
@@ -257,7 +260,7 @@ def assign(times: list[float], each: list[bool], seed: int = 0, kinds=None,
 
     def weights(prev: int, gap: float, in_run: bool) -> dict[int, float]:
         cls = "fast" if gap < FAST_RUN_SEC else "mid" if gap < FAST_SEC else "slow"
-        prior = STEP_PRIOR[cls]
+        prior = step_prior[cls]
         want = pattern_step() if in_run else None
         w = {}
         for b in range(1, 9):
@@ -334,7 +337,7 @@ def assign(times: list[float], each: list[bool], seed: int = 0, kinds=None,
         if kind == "slide":
             long = k.length >= 2 * (Fraction(1, 4) if 60.0 / beat < 120 else Fraction(1, 2))
             side = RIGHT if button <= 4 else LEFT
-            opts = slide_options(button, side, k.restricted, long, allow_wifi)
+            opts = slide_options(button, side, k.restricted, long, allow_wifi, shapes)
             if not opts:
                 return Placed("tap", button)
             shape, end = _pick(opts, rng)
@@ -403,7 +406,7 @@ def assign(times: list[float], each: list[bool], seed: int = 0, kinds=None,
                     if SIDE[a] == "L" and SIDE[b] == "R":
                         continue
                     near = 1.0 / (1 + ring_distance(at["R"], a) + ring_distance(at["L"], b))
-                    wt = EACH_DIST[d] * near
+                    wt = each_dist.get(d, 0.05) * near
                     if target is not None and set(target) == {a, b}:
                         wt *= MOTIF_BOOST                # the repeated bar's pair
                     elif target is not None and len(target) == 1 and target[0] in (a, b):

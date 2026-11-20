@@ -135,7 +135,7 @@ def test_slide_lengths_follow_charting_habits(analysis):
     r = generate(a, level="14", seed=4, duration=dur)
     lengths = re.findall(r"\d[-<>^vpqw]+\d\[(\d+:\d+)\]", r["maidata"])
     assert lengths and lengths.count("8:1") / len(lengths) > 0.5           # mostly [8:1] at 170 BPM
-    assert not {"16:1", "16:3", "32:1"} & set(lengths)                       # never faster than [8:1]
+    assert all(4 * int(m) / int(n) >= 0.5 for n, m in (x.split(":") for x in lengths))  # never faster than [8:1]
 
 
 def test_bursts(analysis):

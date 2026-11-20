@@ -75,7 +75,7 @@ def generate(analysis: dict, *, level: str, slot: int = 5, seed: int = 0,
     placed = hands.assign(times, [m.each for m in moments], seed=seed, kinds=ks, beat=beat,
                           allow_wifi=level_value(level) >= 13.7, strong=lambda tm: strong_at.get(tm, False),
                           clear_sec=slide_clear_beats(bpm) * beat,
-                          beats=[chart_beat(m.grid) for m in moments])
+                          beats=[chart_beat(m.grid) for m in moments], level=level)
 
     chart = Chart(bpm)
     notes_out = []

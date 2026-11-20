@@ -32,7 +32,8 @@ from fractions import Fraction
 import numpy as np
 
 from backend.checker.playability import slide_clear_beats
-from backend.generator.difficulty import Targets, level_value
+from backend.generator.difficulty import Targets, level_value, nearest_level
+from backend.generator.priors import SLIDE_BEATS
 from backend.generator.placement import SUB, Moment, mark_each_moments
 
 ONE_HAND_SEC = 0.15          # one hand alone: notes at least this far apart
@@ -43,13 +44,13 @@ HOLD_SEC = (0.20, 1.6)       # hold length range (seconds)
 NATURAL_GAP_BEATS = 1        # a gap this long after a note = sustained sound -> hold
 # slide travel, in units of [8:1] (half a beat; [16:1] on slow songs that are
 # charted in double time). Real charts: ~75% [8:1], never faster.
-SLIDE_UNITS = ((1, 0.72), (2, 0.14), (3, 0.06), (4, 0.08))     # (units, share)
-DOUBLE_TIME_BPM = 120        # below: one unit = [16:1]
+SLIDE_MIN_BEATS = 0.5        # never faster than [8:1]...
+SLIDE_MAX_BEATS = 3.0
+DOUBLE_TIME_BPM = 120        # ...except on slow songs charted in double time (halved lengths)
 SLIDE_WAIT = Fraction(1)     # star waits 1 beat before moving (simai default)
 EACH_FIRST_SHARE = 0.5       # EACH placed before holds/slides (the rest after, around them)
 EACH_ROOM_SEC = 0.09         # an EACH needs at least this much room on both sides
 # bursts: very fast clusters ({24}/{32}, doubled on slow songs) on drum fills
-BURST_PER_MIN = ((15.0, 5.0), (14.7, 4.0), (14.2, 3.0), (13.7, 1.5), (0.0, 0.0))
 BURST_SEC = (0.030, 0.066)   # spacing between burst notes (seconds)
 BURST_SIZES = ((3, 0.40), (4, 0.40), (5, 0.10), (7, 0.10))
 BURST_ROOM_SEC = 0.12        # quiet before the next note (and at least BURST_ROOM_BEATS)
@@ -182,7 +183,12 @@ def decide(moments: list[Moment], times: list[float], analysis: dict, targets: T
     # target goes next) so neither uses up all the room for the other
     n_slide = int(round(targets.slides_per_min * span_min))
     n_hold = int(round(targets.hold_pct / 100.0 * n * (1 + each_frac) * HOLD_KEEP_GUESS))
-    unit = Fraction(1, 4) if analysis["bpm"] < DOUBLE_TIME_BPM else Fraction(1, 2)
+    # slide lengths as charted at this level ([8:1] mostly), halved on slow songs
+    half = analysis["bpm"] < DOUBLE_TIME_BPM
+    shares = [(Fraction(b).limit_denominator(8) / (2 if half else 1), p)
+              for b, p in SLIDE_BEATS[nearest_level(targets.level)].items()
+              if SLIDE_MIN_BEATS <= b <= SLIDE_MAX_BEATS]
+    unit = min(L for L, _ in shares) if shares else Fraction(1, 2)
     clear = Fraction(slide_clear_beats(analysis["bpm"])).limit_denominator(4)
     hold_lengths = [L for L in HOLD_BEATS if HOLD_SEC[0] <= float(L) * beat <= HOLD_SEC[1]] or [HOLD_BEATS[0]]
     natural = gap_next >= NATURAL_GAP_BEATS * beat
@@ -196,13 +202,14 @@ def decide(moments: list[Moment], times: list[float], analysis: dict, targets: T
     def slide_at(i):
         # a weighted pick, then the plain [8:1] if that doesn't fit; the hand
         # stays busy until `clear` after the slide ends
-        r, units = rng.random(), 1
-        for u, share in SLIDE_UNITS:
-            r -= share
+        total = sum(p for _, p in shares)
+        r, L = rng.random() * total, unit
+        for Lx, p in shares:
+            r -= p
             if r <= 0:
-                units = u
+                L = Lx
                 break
-        ls = [unit * units] + ([unit] if units > 1 else [])
+        ls = [L] + ([unit] if L != unit else [])
         return try_lengths(i, "slide", ls, SLIDE_WAIT, tail=clear)
 
     def hold_at(i):
@@ -322,8 +329,7 @@ def _bursts(moments, out, t, owner, noeach, analysis, targets, span_min, rng) ->
     """Turn some moments into bursts; returns the moments they swallow (the
     notes inside a burst and right after it)."""
     lv = level_value(targets.level)
-    per_min = next(v for th, v in BURST_PER_MIN if lv >= th)
-    want = int(round(per_min * span_min))
+    want = int(round(targets.bursts_pm * span_min))
     n = len(moments)
     if want <= 0 or n < 3:
         return []
