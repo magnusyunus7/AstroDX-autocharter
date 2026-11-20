@@ -85,3 +85,21 @@ def test_playability_checker_catches_problems():
     probs = check("(120){4}1h[1:1],5,6/7,1,E")
     assert any("free hand" in p for p in probs) and any("held button" in p for p in probs)
     assert any("one hand" in p for p in check("(120){4}1h[1:1],{16}5,6,E"))
+    # slide finish room: EACH / a note on or next to the slide needs a {4} after it ends
+    probs = check("(170){4}2/7,1b<6[16:3]/8b>3[16:3],,3/6,E")
+    assert any("EACH" in p for p in probs) and any("next to slide" in p for p in probs)
+    assert check("(170){4}2/7,1b<6[8:1]/8b>3[8:1],,,3/6,E") == []
+    assert any("next to slide" in p for p in check("(200){4}1-5[8:1],,{8},5,E"))  # fast BPM: more than a {4}
+    assert check("(170){4}1-5[8:1],,{8},3,E") == []                           # away from the slide: fine
+    assert any("next to slide 1>4" in p for p in check("(170){8}1>4[8:1],,,6,3,{4},,E"))
+    assert any("touch" in p for p in check("(170){8}1-5[8:1],B5,{4},,E"))      # touch during a slide
+    # a held button gets the same room after release
+    assert any("after a hold" in p for p in check("(170){16}6h[4:1],1,,,6,{4},,E"))
+
+
+def test_slide_lengths_follow_charting_habits(analysis):
+    a, dur = analysis
+    r = generate(a, level="14", seed=4, duration=dur)
+    lengths = re.findall(r"\d[-<>^vpqw]+\d\[(\d+:\d+)\]", r["maidata"])
+    assert lengths and lengths.count("8:1") / len(lengths) > 0.5           # mostly [8:1] at 170 BPM
+    assert not {"16:1", "16:3", "32:1"} & set(lengths)                       # never faster than [8:1]

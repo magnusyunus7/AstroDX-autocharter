@@ -15,6 +15,7 @@ from backend.generator import hands, kinds, placement, planner
 from backend.generator.difficulty import level_value, targets as level_targets
 from backend.models.chart import Chart, Hold, Slide, Tap, Touch
 from backend.simai.maidata import DifficultyChart, MaidataMeta, build_maidata, rebase_first
+from backend.checker.playability import slide_clear_beats
 from backend.simai.stats import stats
 
 DESIGNER = "AstroDX autocharter"
@@ -71,11 +72,14 @@ def generate(analysis: dict, *, level: str, slot: int = 5, seed: int = 0,
         moments, times, ks = build(scale)
     strong_at = {tm: m.strength >= 1.0 and m.grid % sub == 0 for m, tm in zip(moments, times)}
     placed = hands.assign(times, [m.each for m in moments], seed=seed, kinds=ks, beat=beat,
-                          allow_wifi=level_value(level) >= 13.7, strong=lambda tm: strong_at.get(tm, False))
+                          allow_wifi=level_value(level) >= 13.7, strong=lambda tm: strong_at.get(tm, False),
+                          clear_sec=slide_clear_beats(bpm) * beat)
 
     chart = Chart(bpm)
     notes_out = []
     for m, k, group, tm in zip(moments, ks, placed, times):
+        if not group:                                    # no safe button: left out
+            continue
         b0 = chart_beat(m.grid)
         brk = k.brk
         kinds_here, end_t = [], tm

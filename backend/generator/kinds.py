@@ -5,7 +5,9 @@ Placement decided *when* things are hit. Here some of those moments turn into
 notes that keep a hand busy (holds, slides) or move to the touch screen:
 
   * slide: star tap, the star waits 1 beat (simai default), then travels for
-    `length`; the hand is busy from the tap to the end of the travel
+    `length` (mostly [8:1]); the hand is busy from the tap to the end of the
+    travel. Then finish room (at least a {4}, more at fast BPM): no EACH and
+    no note on the slide's path, or the finish "splashes" into it
   * hold: the hand stays down for `length`; a long gap after the note (the
     sound sustains) makes a natural hold
   * touch: a single note moved to the touch screen (sensor chosen with the
@@ -14,10 +16,12 @@ notes that keep a hand busy (holds, slides) or move to the touch screen:
 While one hand is busy the other hand plays every note in that window alone.
 A hold/slide may drop a few weak notes so that's one-hand speed (charters thin
 out around slides too); the pipeline plans a little extra density to make up.
-EACH comes first (strongest roomy moments); busy windows never contain one.
+Busy windows never contain an EACH: the strongest EACH are placed first, the
+rest after the holds/slides, around them.
 Counts follow the level targets (slides per minute, hold %, touch %, BREAK %).
 
-Order: EACH -> slides and holds (taking turns) -> drop -> touch -> BREAK.
+Order: half the EACH -> slides and holds (taking turns) -> drop -> rest of EACH
+-> touch -> BREAK.
 """
 from __future__ import annotations
 
@@ -27,6 +31,7 @@ from fractions import Fraction
 
 import numpy as np
 
+from backend.checker.playability import slide_clear_beats
 from backend.generator.difficulty import Targets, level_value
 from backend.generator.placement import SUB, Moment, mark_each_moments
 
@@ -36,9 +41,12 @@ FAST_SEC = 0.20              # same as hands.FAST_SEC: closer notes alternate ha
 HOLD_BEATS = (Fraction(1, 2), Fraction(1), Fraction(3, 2), Fraction(2), Fraction(3), Fraction(4))
 HOLD_SEC = (0.20, 1.6)       # hold length range (seconds)
 NATURAL_GAP_BEATS = 1        # a gap this long after a note = sustained sound -> hold
-SLIDE_BEATS = (Fraction(1, 4), Fraction(1, 2), Fraction(3, 4), Fraction(1), Fraction(3, 2), Fraction(2))
-SLIDE_SEC = (0.17, 0.60)     # slide travel range (seconds)
+# slide travel, in units of [8:1] (half a beat; [16:1] on slow songs that are
+# charted in double time). Real charts: ~75% [8:1], never faster.
+SLIDE_UNITS = ((1, 0.72), (2, 0.14), (3, 0.06), (4, 0.08))     # (units, share)
+DOUBLE_TIME_BPM = 120        # below: one unit = [16:1]
 SLIDE_WAIT = Fraction(1)     # star waits 1 beat before moving (simai default)
+EACH_FIRST_SHARE = 0.5       # EACH placed before holds/slides (the rest after, around them)
 EACH_ROOM_SEC = 0.09         # an EACH needs at least this much room on both sides
 TOUCH_GAP_SEC = 0.08         # touch notes need this much room on both sides
 BREAK_ROOM_SEC = 0.20        # BREAK accents: this much room on both sides
@@ -56,6 +64,7 @@ class Kind:
     brk: bool = False
     busy_until: float = 0.0           # time the hand is free again
     first_other: float = 1e9          # time of the first note the other hand plays meanwhile
+    clear_until: float = 0.0          # slide: until then, no EACH and nothing on its path
 
 
 def decide(moments: list[Moment], times: list[float], analysis: dict, targets: Targets,
@@ -77,11 +86,13 @@ def decide(moments: list[Moment], times: list[float], analysis: dict, targets: T
     gap_next = np.append(np.diff(t), 1e9)
     owner = np.full(n, -1)            # moment -> the hold/slide whose window it's in
     removed = np.zeros(n, bool)
+    noeach = np.zeros(n, bool)       # inside a slide's finish room: no EACH here
 
-    # ---- EACH first (the strongest roomy moments); holds/slides then work around them
+    # ---- EACH, part 1: the strongest share first; holds/slides work around them
     step = beat / SUB
-    mark_each_moments(moments, int(round(each_frac * n)), gap_steps,
-                      min_room=max(gap_steps, int(np.ceil(EACH_ROOM_SEC / step - 1e-9))))
+    each_room = max(gap_steps, int(np.ceil(EACH_ROOM_SEC / step - 1e-9)))
+    mark_each_moments(moments, int(round(each_frac * n * EACH_FIRST_SHARE)), gap_steps,
+                      min_room=each_room)
     each = np.array([m.each for m in moments])
 
     def fits(i: int, end_t: float, max_drop: int):
@@ -127,22 +138,31 @@ def decide(moments: list[Moment], times: list[float], analysis: dict, targets: T
         owner[i] = i
         owner[w] = i
 
-    def blocked_from(i: int) -> float:
-        """The hand must be free again before the next EACH or busy window."""
+    def next_time(i: int, cond) -> float:
         j = i + 1
-        while j < n and (removed[j] or not (each[j] or owner[j] >= 0)):
+        while j < n and (removed[j] or not cond(j)):
             j += 1
-        return t[j] - RELEASE_SEC if j < n else end_limit
+        return t[j] if j < n else float("inf")
 
-    def try_lengths(i, kind, lengths, extra_beats=Fraction(0)):
-        limit = min(end_limit, blocked_from(i))         # and before the audio ends
+    def try_lengths(i, kind, lengths, extra_beats=Fraction(0), tail=Fraction(0)):
+        """First length that fits: the hand is free before the next busy window,
+        `tail` beats of room are left before the next EACH (slide finish), and
+        it all ends before the audio does."""
+        window_at = next_time(i, lambda j: owner[j] >= 0)
+        each_at = next_time(i, lambda j: each[j])
         for L in lengths:
             end_t = t[i] + float(extra_beats + L) * beat
-            if end_t > limit:
+            clear_t = end_t + float(tail) * beat
+            if end_t + RELEASE_SEC > window_at or clear_t > each_at + 1e-6 or clear_t > end_limit:
                 continue
             fit = fits(i, end_t, MAX_DROP[kind])
             if fit is not None:
                 claim(i, kind, L, fit, end_t)
+                out[i].clear_until = clear_t
+                # notes while it finishes come from the other side: stay in own half
+                out[i].restricted = out[i].restricted or next_time(i, lambda j: True) < clear_t
+                if tail:                                # no EACH while the slide finishes
+                    noeach[(t > t[i]) & (t < clear_t)] = True
                 return True
         return False
 
@@ -150,8 +170,8 @@ def decide(moments: list[Moment], times: list[float], analysis: dict, targets: T
     # target goes next) so neither uses up all the room for the other
     n_slide = int(round(targets.slides_per_min * span_min))
     n_hold = int(round(targets.hold_pct / 100.0 * n * (1 + each_frac) * HOLD_KEEP_GUESS))
-    slide_lengths = [L for L in SLIDE_BEATS if SLIDE_SEC[0] <= float(L) * beat <= SLIDE_SEC[1]] \
-        or [min(SLIDE_BEATS, key=lambda L: abs(float(L) * beat - SLIDE_SEC[0]))]
+    unit = Fraction(1, 4) if analysis["bpm"] < DOUBLE_TIME_BPM else Fraction(1, 2)
+    clear = Fraction(slide_clear_beats(analysis["bpm"])).limit_denominator(4)
     hold_lengths = [L for L in HOLD_BEATS if HOLD_SEC[0] <= float(L) * beat <= HOLD_SEC[1]] or [HOLD_BEATS[0]]
     natural = gap_next >= NATURAL_GAP_BEATS * beat
     # stars on strong beats; holds where the sound sustains, else on strong beats
@@ -162,9 +182,16 @@ def decide(moments: list[Moment], times: list[float], analysis: dict, targets: T
         + (0.15 if pos[i] == 0 else 0.05 if pos[i] == 6 else 0.0) + rng.uniform(0, 0.35)))
 
     def slide_at(i):
-        ls = slide_lengths[:]
-        rng.shuffle(ls)
-        return try_lengths(i, "slide", sorted(ls[:2], key=float) + sorted(ls[2:], key=float), SLIDE_WAIT)
+        # a weighted pick, then the plain [8:1] if that doesn't fit; the hand
+        # stays busy until `clear` after the slide ends
+        r, units = rng.random(), 1
+        for u, share in SLIDE_UNITS:
+            r -= share
+            if r <= 0:
+                units = u
+                break
+        ls = [unit * units] + ([unit] if units > 1 else [])
+        return try_lengths(i, "slide", ls, SLIDE_WAIT, tail=clear)
 
     def hold_at(i):
         if natural[i]:                                   # longest that releases before the next note
@@ -199,23 +226,36 @@ def decide(moments: list[Moment], times: list[float], analysis: dict, targets: T
     is_head = np.array([k.kind in ("hold", "slide") for k in out])
     n = len(moments)
 
+    # ---- EACH, part 2: the rest, outside busy windows (a hold/slide head may
+    # be one if the other hand has time before its next note)
+    owner_kept, noeach_kept = owner[keep], noeach[keep]
+    want = int(round(each_frac * n))
+    have = sum(m.each for m in moments)
+    if have < want:
+        allowed = [not moments[i].each and not noeach_kept[i] and (owner_kept[i] < 0 or (
+            is_head[i] and out[i].first_other - t[i] >= ONE_HAND_SEC)) for i in range(n)]
+        mark_each_moments(moments, want - have, gap_steps, allowed, min_room=each_room)
+    elif have > want:                                    # the drops were single notes
+        plain = [i for i in range(n) if moments[i].each and not is_head[i]]
+        for i in sorted(plain, key=lambda i: strength[i])[:have - want]:
+            moments[i].each = False
     for i in range(n):
-        if moments[i].each and is_head[i] and out[i].first_other >= 1e9 \
+        quiet_until = max(out[i].busy_until + RELEASE_SEC, out[i].clear_until)
+        nothing_after = i + 1 >= n or t[i + 1] >= quiet_until   # both hands busy: nothing may come
+        if moments[i].each and is_head[i] and nothing_after \
                 and rng.random() < (0.35 if lv >= 13 else 0.15):
             out[i].partner = out[i].kind                 # double hold / mirrored double slide
-    # the drops were single notes, so the EACH share went up: back to the target
-    extra = sum(m.each for m in moments) - int(round(each_frac * n))
-    if extra > 0:
-        plain = [i for i in range(n) if moments[i].each and not is_head[i]]
-        for i in sorted(plain, key=lambda i: strength[i])[:extra]:
-            moments[i].each = False
     hits = sum(2 if m.each else 1 for m in moments)
 
     # ---- touch: single taps with a little room
     gap_prev = np.insert(np.diff(t), 0, 1e9)
     gap_next = np.append(np.diff(t), 1e9)
     n_touch = int(round(targets.touch_pct / 100.0 * hits))
-    cand = [i for i in range(n) if out[i].kind == "tap" and not moments[i].each
+    in_slide = np.zeros(n, bool)                         # touch sensors sit on slide paths
+    for i in range(n):
+        if out[i].kind == "slide":
+            in_slide |= (t > t[i]) & (t < out[i].clear_until)
+    cand = [i for i in range(n) if out[i].kind == "tap" and not moments[i].each and not in_slide[i]
             and gap_prev[i] >= TOUCH_GAP_SEC and gap_next[i] >= TOUCH_GAP_SEC]
     rng.shuffle(cand)
     for i in cand[:n_touch]:
