@@ -84,9 +84,11 @@ export class GeneratePanel {
   _summary() {
     const s = this.result.stats, t = this.result.targets;
     const slotName = { 4: "Expert", 5: "Master", 6: "Re:Master" }[this.result.slot];
+    const pct = (v) => (v ?? 0).toFixed(0) + "%";
     this._info(`${slotName} ${this.result.level} · ${s.notes} notes · ${s.nps.toFixed(1)} notes/s ` +
-      `(target ${t.nps}) · busiest 4 s ${s.peak_nps.toFixed(1)} (${t.peak_nps}) · EACH ${s.each_pct.toFixed(0)}% ` +
-      `· longest stream ${s.longest_stream} · seed ${this.result.seed}`, "ok-text");
+      `(target ${t.nps}) · busiest 4 s ${s.peak_nps.toFixed(1)} (${t.peak_nps}) · EACH ${pct(s.each_pct)} ` +
+      `· holds ${pct(s.hold_pct)} · slides ${(s.slide_pm ?? 0).toFixed(0)}/min · touch ${pct(s.touch_pct)} ` +
+      `· BREAK ${pct(s.break_pct)} · longest stream ${s.longest_stream} · seed ${this.result.seed}`, "ok-text");
   }
 
   _info(text, cls) {
@@ -108,10 +110,21 @@ export class GeneratePanel {
     g.fillText("chart", 4, y0 + LANE_H / 2);
     const t0 = tl.start, t1 = tl.start + tl.viewSec;
     for (const n of this.result.notes) {
-      if (n.t < t0 - 0.1 || n.t > t1 + 0.1) continue;
+      const end = n.end ?? n.t;
+      if (end < t0 - 0.1 || n.t > t1 + 0.1) continue;
       const x = Math.round(tl.timeToX(n.t));
+      const kinds = n.kinds ?? ["tap"];
       const each = n.buttons.length > 1;
-      g.fillStyle = n.break ? "#ffab40" : each ? "#ffe066" : "#ff8ad8";
+      const color = n.break ? "#ffab40" : kinds.includes("slide") ? "#5ec8ff"
+        : kinds.includes("touch") ? "#9dff8a" : each ? "#ffe066" : "#ff8ad8";
+      g.fillStyle = color;
+      // holds / slides: a thin bar for as long as the hand is busy
+      if (end > n.t + 0.01) {
+        const x1 = Math.round(tl.timeToX(end));
+        g.globalAlpha = 0.55;
+        g.fillRect(x, y0 + LANE_H * 0.35, Math.max(1, x1 - x), kinds.includes("slide") ? 3 : 5);
+        g.globalAlpha = 1;
+      }
       const hh = each ? LANE_H : LANE_H * 0.65;
       g.fillRect(x - 1, y0 + LANE_H - hh, 3, hh);
     }

@@ -4,6 +4,10 @@ Candidates are grid positions (16ths and triplet 8ths from level 12, 8ths and
 triplets below) that something is audibly hit on. A minimum gap keeps local
 speed under the level's peak (so a 314 BPM song gets 8ths, not 48 ms 16ths).
 EACH goes to the strongest moments that aren't inside fast runs.
+
+Checked against human charts (tools: notes within 30 ms of a human note):
+triplet points next to a 16th hit are mostly smear, and at >= 230 BPM triplets
+of the fast beat are almost never charted.
 """
 from __future__ import annotations
 
@@ -20,6 +24,8 @@ POS_LOW = (0, 4, 6, 8)                     # 8ths + triplet 8ths
 POS_BONUS = {0: 0.25, 6: 0.10, 3: 0.0, 9: 0.0, 4: -0.03, 8: -0.03}
 STRAIGHT_ONLY = {3, 6, 9}                  # a beat with any of these can't take triplets
 TRIPLET_ONLY = {4, 8}                      # ...and vice versa (one feel per beat)
+TRIPLET_SMEAR = 1.2                        # triplet point must beat its 16th neighbour by this
+FAST_BPM = 230                             # at/above: no triplet positions
 MIN_STRENGTH = 0.15                        # weaker positions aren't candidates
 GAP_FACTOR = 1.25                          # min gap = 1 / (peak_nps * this)
 STREAM_SEC = 0.125                         # notes closer than this form a stream
@@ -44,7 +50,15 @@ def candidate_scores(analysis: dict, targets: Targets) -> np.ndarray:
     allowed = POS_HIGH if level_value(targets.level) >= 12 else POS_LOW
     pos = np.arange(len(s)) % SUB
     bonus = np.array([POS_BONUS.get(p, 0.0) for p in range(SUB)])[pos]
+    # a hit on a 16th smears into the neighbouring triplet point (1 step away):
+    # a triplet point only counts if it's clearly stronger than that 16th
+    nb = np.concatenate([[0.0], s[:-1]])                   # s[i-1]: 3 for 4
+    nf = np.concatenate([s[1:], [0.0]])                    # s[i+1]: 9 for 8
+    smear = np.where(pos == 4, nb, np.where(pos == 8, nf, -np.inf))
     score = s + bonus * (s > MIN_STRENGTH)
+    score[s <= smear * TRIPLET_SMEAR] = -np.inf
+    if analysis["bpm"] >= FAST_BPM:          # felt at half time: triplets of the fast beat
+        score[np.isin(pos, (4, 8))] = -np.inf  # are rarely real (and read badly)
     score[~np.isin(pos, allowed)] = -np.inf
     score[s < MIN_STRENGTH] = -np.inf
     return score
@@ -87,7 +101,11 @@ def bar_capacity(analysis: dict, targets: Targets, each_frac: float) -> np.ndarr
     return np.minimum(per_bar, (4 * SUB) // gap) * (1 + each_frac)
 
 
-def place(analysis: dict, targets: Targets, budgets: np.ndarray) -> list[Moment]:
+def place(analysis: dict, targets: Targets, budgets: np.ndarray,
+          mark_each: bool = True) -> list[Moment]:
+    """Moments per bar (budget / (1 + EACH share): EACH adds the rest). With
+    mark_each=False the EACH choice is left to the caller (kinds.py, which
+    knows where hands are busy)."""
     score = candidate_scores(analysis, targets)
     gap = min_gap_steps(analysis, targets)
     each_frac = targets.each_pct / 100.0
@@ -117,12 +135,26 @@ def place(analysis: dict, targets: Targets, budgets: np.ndarray) -> list[Moment]
     moments.sort(key=lambda m: m.grid)
     moments = _cap_streams(moments, analysis, targets)
 
-    # EACH: strongest moments with room around them (not inside fast runs)
-    if moments:
-        grids = np.array([m.grid for m in moments])
-        room = np.minimum(np.diff(grids, prepend=-10 ** 6), np.diff(grids, append=10 ** 6))
-        eligible = [i for i, m in enumerate(moments) if room[i] >= 2 * gap]
-        n_each = int(round(each_frac * len(moments)))
-        for i in sorted(eligible, key=lambda i: -moments[i].strength)[:n_each]:
-            moments[i].each = True
+    if mark_each:
+        mark_each_moments(moments, int(round(each_frac * len(moments))), gap)
     return moments
+
+
+def mark_each_moments(moments: list[Moment], n_each: int, gap: int, allowed=None,
+                      min_room: int | None = None) -> None:
+    """EACH on the strongest moments, roomiest first: not inside fast runs
+    (room >= 2 gaps), then at least `min_room` grid steps on both sides, then
+    anywhere (charts do put EACH inside 16th runs, just less often)."""
+    if not moments:
+        return
+    grids = np.array([m.grid for m in moments])
+    room = np.minimum(np.diff(grids, prepend=-10 ** 6), np.diff(grids, append=10 ** 6))
+    ok = [allowed is None or allowed[i] for i in range(len(moments))]
+    bounds = [2 * gap] + ([min_room] if min_room is not None else []) + [0]
+    left, hi = n_each, 10 ** 9
+    for lo in bounds:
+        tier = [i for i in range(len(moments)) if ok[i] and lo <= room[i] < hi]
+        for i in sorted(tier, key=lambda i: -moments[i].strength)[:max(0, left)]:
+            moments[i].each = True
+            left -= 1
+        hi = lo
