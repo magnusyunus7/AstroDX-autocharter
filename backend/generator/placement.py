@@ -111,33 +111,92 @@ def place(analysis: dict, targets: Targets, budgets: np.ndarray,
     each_frac = targets.each_pct / 100.0
     taken = np.zeros(len(score), bool)
     beat_feel: dict[int, str] = {}          # beat index -> "straight" / "triplet"
+    chosen: dict[int, list[int]] = {}       # bar -> positions picked (for repeating rhythms)
+    profiles: dict[int, np.ndarray] = {}
     moments: list[Moment] = []
     per_bar = 4 * SUB
+    def select(order, want: int) -> list[int]:
+        """Grid points from `order` that fit (gap, one feel per beat), up to want."""
+        out, feel_here = [], {}
+        for i in order:
+            if len(out) >= want or not np.isfinite(score[i]):
+                break
+            if taken[max(0, i - gap + 1):i + gap].any() or any(abs(i - j) < gap for j in out):
+                continue
+            p = int(i % SUB)
+            feel = "straight" if p in STRAIGHT_ONLY else "triplet" if p in TRIPLET_ONLY else None
+            bt = int(i // SUB)
+            if feel and beat_feel.get(bt, feel_here.get(bt, feel)) != feel:
+                continue                     # don't mix 16ths and triplets in one beat
+            if feel:
+                feel_here[bt] = feel
+            out.append(int(i))
+        return out
+
     for b, notes in enumerate(budgets):
         if notes <= 0:
             continue
         want = int(round(notes / (1 + each_frac)))           # moments; EACH adds the rest
         lo, hi = b * per_bar, (b + 1) * per_bar
-        order = lo + np.argsort(-score[lo:hi])
-        got = 0
-        for i in order:
-            if got >= want or not np.isfinite(score[i]):
-                break
-            if taken[max(0, i - gap + 1):i + gap].any():
+        picks = select(lo + np.argsort(-score[lo:hi]), want)
+        # the music repeats: if an earlier bar sounds the same, reuse its rhythm
+        # (never more notes than this bar would get anyway)
+        prof = np.where(np.isfinite(score[lo:hi]), score[lo:hi], 0.0)
+        for back in RHYTHM_BACK:
+            src = chosen.get(b - back)
+            if src is None or not (len(picks) - 1 <= len(src) <= len(picks)):
                 continue
+            sp = profiles[b - back]
+            if prof.std() > 0 and sp.std() > 0 and np.corrcoef(prof, sp)[0, 1] >= RHYTHM_SIM:
+                copy = select([lo + p for p in src], len(src))
+                if len(copy) == len(src):
+                    picks = copy
+                    break
+        profiles[b] = prof
+        for i in picks:
+            taken[i] = True
             p = int(i % SUB)
             feel = "straight" if p in STRAIGHT_ONLY else "triplet" if p in TRIPLET_ONLY else None
-            if feel and beat_feel.setdefault(int(i // SUB), feel) != feel:
-                continue                     # don't mix 16ths and triplets in one beat
-            taken[i] = True
+            if feel:
+                beat_feel.setdefault(int(i // SUB), feel)
             moments.append(Moment(int(i), float(score[i])))
-            got += 1
+        chosen[b] = sorted(i - lo for i in picks)
     moments.sort(key=lambda m: m.grid)
+    moments = merge_flams(moments)
     moments = _cap_streams(moments, analysis, targets)
 
     if mark_each:
         mark_each_moments(moments, int(round(each_frac * len(moments))), gap)
     return moments
+
+
+RHYTHM_BACK = (1, 2, 4, 8)              # earlier bars to compare with
+RHYTHM_SIM = 0.70                       # onset profiles this alike: same rhythm
+FLAM_STEPS = 3          # two notes this close (a 16th or less)...
+FLAM_ROOM = 6           # ...with at least an 8th of nothing around them: one hit, not two
+
+
+def merge_flams(moments: list[Moment]) -> list[Moment]:
+    """Two lone notes a 16th apart usually are one hit the onset curves caught
+    twice (or a flam): keep one, on the stronger spot (8ths first), and make
+    it a likely EACH. Inside runs, 16ths are left alone."""
+    if len(moments) < 2:
+        return moments
+    g = [m.grid for m in moments]
+    drop = set()
+    for i in range(len(moments) - 1):
+        if i in drop or i + 1 in drop:
+            continue
+        d = g[i + 1] - g[i]
+        before = g[i] - g[i - 1] if i > 0 else 10 ** 6
+        after = g[i + 2] - g[i + 1] if i + 2 < len(g) else 10 ** 6
+        if d <= FLAM_STEPS and before >= FLAM_ROOM and after >= FLAM_ROOM:
+            a, b = moments[i], moments[i + 1]
+            rank = lambda m: (m.grid % (SUB // 2) == 0, m.strength)
+            keep, lose = (a, i + 1) if rank(a) >= rank(b) else (b, i)
+            keep.strength += 0.5                 # a big hit: good EACH spot
+            drop.add(lose)
+    return [m for k, m in enumerate(moments) if k not in drop]
 
 
 def mark_each_moments(moments: list[Moment], n_each: int, gap: int, allowed=None,

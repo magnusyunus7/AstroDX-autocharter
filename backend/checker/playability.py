@@ -17,6 +17,7 @@ generator writes) for:
     what, so a note counts as the slide hand's when the other hand played less
     than ONE_HAND_SEC before it (the generator knows its hands exactly)
   * hold release: the held button gets the same room after the hold ends
+  * straight and curve slides cover at least 2 buttons (1-3, 1<7; not 1-2, 1<8)
 Returns a list of problems (empty = fine).
 """
 from __future__ import annotations
@@ -163,6 +164,9 @@ def check(body: str, first: float = 0.0) -> list[str]:
             sm = _SLIDE.match(tok)
             if sm:                                        # its hand is busy while it travels
                 s, shape, e = int(sm.group(1)), sm.group(2), int(sm.group(3))
+                span = min((e - s) % 8, (s - e) % 8) if shape == "-" else len(slide_path(s, shape, e))
+                if shape in ("-", ">", "<", "^") and span < 2:
+                    problems.append(f"{t:.3f}s: {tok}: a straight/curve slide must cover at least 2 buttons")
                 move = t + beat
                 end = move + _dur_beats(tok) * beat
                 busy.append((move, end - 1e-6, s))

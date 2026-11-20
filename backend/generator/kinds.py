@@ -48,6 +48,16 @@ DOUBLE_TIME_BPM = 120        # below: one unit = [16:1]
 SLIDE_WAIT = Fraction(1)     # star waits 1 beat before moving (simai default)
 EACH_FIRST_SHARE = 0.5       # EACH placed before holds/slides (the rest after, around them)
 EACH_ROOM_SEC = 0.09         # an EACH needs at least this much room on both sides
+# bursts: very fast clusters ({24}/{32}, doubled on slow songs) on drum fills
+BURST_PER_MIN = ((15.0, 5.0), (14.7, 4.0), (14.2, 3.0), (13.7, 1.5), (0.0, 0.0))
+BURST_SEC = (0.030, 0.066)   # spacing between burst notes (seconds)
+BURST_SIZES = ((3, 0.40), (4, 0.40), (5, 0.10), (7, 0.10))
+BURST_ROOM_SEC = 0.12        # quiet before the next note (and at least BURST_ROOM_BEATS)
+BURST_ROOM_BEATS = 0.5       # a burst is a moment: no heavy pattern right after it
+BURST_AFTER_MAX = 2          # notes allowed in the beat after that room
+BURST_LEAD_SEC = 0.09        # ...and since the previous one
+BURST_SPACING_SEC = 0.75     # bursts at least this far apart
+BURST_MAX_EAT = 3            # notes a burst may replace (inside it / right after it)
 TOUCH_GAP_SEC = 0.08         # touch notes need this much room on both sides
 BREAK_ROOM_SEC = 0.20        # BREAK accents: this much room on both sides
 BREAK_SPACING_SEC = 1.0      # ...and at least this far from other BREAKs
@@ -65,6 +75,8 @@ class Kind:
     busy_until: float = 0.0           # time the hand is free again
     first_other: float = 1e9          # time of the first note the other hand plays meanwhile
     clear_until: float = 0.0          # slide: until then, no EACH and nothing on its path
+    burst_n: int = 0                  # burst: this many notes...
+    burst_div: int = 0                # ...1/burst_div beat apart ({24} -> 6, {32} -> 8)
 
 
 def decide(moments: list[Moment], times: list[float], analysis: dict, targets: Targets,
@@ -226,13 +238,24 @@ def decide(moments: list[Moment], times: list[float], analysis: dict, targets: T
     is_head = np.array([k.kind in ("hold", "slide") for k in out])
     n = len(moments)
 
+    # ---- bursts on drum fills (they replace the moment's note)
+    owner_kept, noeach_kept = owner[keep], noeach[keep]
+    eaten = _bursts(moments, out, t, owner_kept, noeach_kept, analysis, targets, span_min, rng)
+    if eaten:
+        keep2 = np.setdiff1d(np.arange(n), eaten)
+        moments = [moments[i] for i in keep2]
+        out = [out[i] for i in keep2]
+        t, pos, strength = t[keep2], pos[keep2], strength[keep2]
+        owner_kept, noeach_kept = owner_kept[keep2], noeach_kept[keep2]
+        n = len(moments)
+    is_head = np.array([x.kind in ("hold", "slide") for x in out])
+
     # ---- EACH, part 2: the rest, outside busy windows (a hold/slide head may
     # be one if the other hand has time before its next note)
-    owner_kept, noeach_kept = owner[keep], noeach[keep]
     want = int(round(each_frac * n))
     have = sum(m.each for m in moments)
     if have < want:
-        allowed = [not moments[i].each and not noeach_kept[i] and (owner_kept[i] < 0 or (
+        allowed = [not moments[i].each and not noeach_kept[i] and out[i].kind != "burst" and (owner_kept[i] < 0 or (
             is_head[i] and out[i].first_other - t[i] >= ONE_HAND_SEC)) for i in range(n)]
         mark_each_moments(moments, want - have, gap_steps, allowed, min_room=each_room)
     elif have > want:                                    # the drops were single notes
@@ -265,12 +288,12 @@ def decide(moments: list[Moment], times: list[float], analysis: dict, targets: T
     n_break = int(round(targets.break_pct / 100.0 * hits))
     got = 0
     for i, m in enumerate(moments):
-        if break_grids and m.grid in break_grids and out[i].kind != "touch":
+        if break_grids and m.grid in break_grids and out[i].kind not in ("touch", "burst"):
             out[i].brk = True
             got += 2 if m.each else 1
     room = np.minimum(gap_prev, gap_next)
     # roomy accents first, then anything (a BREAK inside a run is fine, just rarer)
-    order = sorted((i for i in range(n) if out[i].kind != "touch" and not out[i].brk),
+    order = sorted((i for i in range(n) if out[i].kind not in ("touch", "burst") and not out[i].brk),
                    key=lambda i: (room[i] < BREAK_ROOM_SEC,
                                   -(strength[i] + (0.3 if pos[i] == 0 else 0.0) + rng.uniform(0, 0.2))))
     taken = sorted(t[i] for i in range(n) if out[i].brk)
@@ -285,3 +308,81 @@ def decide(moments: list[Moment], times: list[float], analysis: dict, targets: T
         taken.insert(k, t[i])
         got += 2 if moments[i].each else 1
     return moments, [float(x) for x in t], out
+
+
+def burst_division(bpm: float) -> list[int]:
+    """Notes per beat for a burst at this BPM: {24}/{32} (6 / 8 per beat),
+    doubled ({48}/{64}) on slow songs, kept within BURST_SEC."""
+    beat = 60.0 / bpm
+    divs = [d for d in (6, 8, 12, 16) if BURST_SEC[0] <= beat / d <= BURST_SEC[1]]
+    return divs[:2] or [6]
+
+
+def _bursts(moments, out, t, owner, noeach, analysis, targets, span_min, rng) -> list[int]:
+    """Turn some moments into bursts; returns the moments they swallow (the
+    notes inside a burst and right after it)."""
+    lv = level_value(targets.level)
+    per_min = next(v for th, v in BURST_PER_MIN if lv >= th)
+    want = int(round(per_min * span_min))
+    n = len(moments)
+    if want <= 0 or n < 3:
+        return []
+    beat = 60.0 / analysis["bpm"]
+    divs = burst_division(analysis["bpm"])
+    stems = np.maximum.reduce([np.asarray(analysis["stems"][s], float) / 127.5
+                               for s in ("drums", "bass", "melody")])
+    # where the music is busy between the 16ths right after a note: fills, rolls, glitches
+    off16 = np.array([j % 3 != 0 for j in range(SUB)])
+    scored = []
+    for i in range(n - 1):
+        if out[i].kind != "tap" or owner[i] >= 0 or noeach[i]:
+            continue
+        g = moments[i].grid
+        win = stems[g + 1:g + 1 + SUB // 2]               # the half beat after it
+        if len(win) < SUB // 2:
+            continue
+        busy_between = float((win * off16[1:1 + SUB // 2]).sum())
+        scored.append((busy_between + 0.3 * moments[i].strength + rng.uniform(0, 0.3), i))
+    scored.sort(reverse=True)
+    eaten: set[int] = set()
+    made, starts = 0, []
+    for _, i in scored:
+        if made >= want:
+            break
+        if i in eaten or out[i].kind != "tap":
+            continue
+        div = rng.choice(divs)
+        r, size = rng.random(), 3
+        for s, share in BURST_SIZES:
+            r -= share
+            if r <= 0:
+                size = s
+                break
+        if lv < 14.0:
+            size = min(size, 4)
+        end = t[i] + (size - 1) * beat / div
+        if any(abs(t[i] - x) < BURST_SPACING_SEC for x in starts) or (i > 0 and t[i] - t[i - 1] < BURST_LEAD_SEC):
+            continue
+        # notes inside the burst and right after it go (at most 2, plain taps only)
+        room = max(BURST_ROOM_SEC, BURST_ROOM_BEATS * beat)
+        inside = []
+        j = i + 1
+        while j < n and t[j] < end + room:
+            inside.append(j)
+            j += 1
+        after = 0
+        while j < n and t[j] < end + room + beat:
+            after += 2 if moments[j].each else 1
+            j += 1
+        if after > BURST_AFTER_MAX:
+            continue                                     # it would run straight into a dense pattern
+        if len(inside) > BURST_MAX_EAT or any(
+                out[x].kind != "tap" or moments[x].each or owner[x] >= 0 for x in inside):
+            continue
+        out[i].kind, out[i].burst_n, out[i].burst_div = "burst", size, div
+        out[i].busy_until = end
+        moments[i].each = False
+        eaten.update(inside)
+        starts.append(t[i])
+        made += 1
+    return sorted(eaten)

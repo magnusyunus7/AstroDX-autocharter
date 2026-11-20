@@ -41,7 +41,22 @@ def test_density_near_target_and_playable(analysis, level):
         btns = [int(n[0]) for n in notes if n[0].isdigit()]
         assert all(1 <= b <= 8 for b in btns) and len(set(btns)) == len(btns)
     assert check(md["charts"][5], md["first"]) == []                 # two hands can play it
-    assert not re.search(r"\{(24|48|96)\}", r["maidata"])            # one feel per beat
+    # one feel per beat (straight or triplet, not both); bursts are the exception
+    times = sorted({n["t"] for n in r["notes"]})
+    burst = {x for x, y in zip(times, times[1:]) if y - x <= 0.067} | \
+            {y for x, y in zip(times, times[1:]) if y - x <= 0.067}
+    beat = 60.0 / a["bpm"]
+    feel = {}
+    for tm in times:
+        if tm in burst:
+            continue
+        steps = round((tm - a["first"]) / beat * 12)
+        k, p = divmod(steps, 12)
+        if p % 3 and p % 4:                              # neither straight nor triplet
+            raise AssertionError(f"odd position at {tm}")
+        f = "s" if p % 3 == 0 and p else "t" if p % 4 == 0 and p else None
+        if f:
+            assert feel.setdefault(k, f) == f, f"mixed feel in beat at {tm}"
 
 
 def test_same_seed_same_chart_and_reroll_differs(analysis):
@@ -107,6 +122,10 @@ def test_playability_checker_catches_problems():
     assert any("free hand" in p for p in check("(170){4}1-4[8:1],2/3,{1},,E"))
     assert check("(170){4}1-4[8:1],1/8,{1},,E") == []
     assert check("(170){8}1-5[8:1],2/8,1,{1},,E") == []
+    # straight / curve slides cover at least 2 buttons
+    assert any("at least 2" in p for p in check("(170){4}1-2[8:1],,,,E"))
+    assert any("at least 2" in p for p in check("(170){4}1<8[8:1],,,,E"))
+    assert check("(170){4}1-3[8:1],,,,E") == [] and check("(170){4}1<7[8:1],,,,E") == []
     # a held button gets the same room after release
     assert any("after a hold" in p for p in check("(170){16}6h[4:1],1,,,6,{4},,E"))
 
@@ -117,3 +136,12 @@ def test_slide_lengths_follow_charting_habits(analysis):
     lengths = re.findall(r"\d[-<>^vpqw]+\d\[(\d+:\d+)\]", r["maidata"])
     assert lengths and lengths.count("8:1") / len(lengths) > 0.5           # mostly [8:1] at 170 BPM
     assert not {"16:1", "16:3", "32:1"} & set(lengths)                       # never faster than [8:1]
+
+
+def test_bursts(analysis):
+    a, dur = analysis
+    r = generate(a, level="14", seed=1, duration=dur)
+    bursts = re.findall(r"\{(24|32|48|64)\}", r["maidata"])
+    assert 1 <= len(bursts) <= 8                                     # a few per song at 14, not a must
+    low = generate(a, level="12", seed=1, duration=dur)                # none below 13+
+    assert not re.findall(r"\{(24|32|48|64)\}", low["maidata"])

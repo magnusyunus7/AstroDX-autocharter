@@ -19,6 +19,7 @@ from backend.checker.playability import slide_clear_beats
 from backend.simai.stats import stats
 
 DESIGNER = "AstroDX autocharter"
+HANDS_DROP_GUESS = 1.05     # the hands leave a few notes out (no safe button): plan that much more
 MAX_SCALE = 1.8            # most extra density planned to make up for notes dropped around holds/slides
 
 
@@ -51,7 +52,7 @@ def generate(analysis: dict, *, level: str, slot: int = 5, seed: int = 0,
 
     def build(scale: float):
         # holds/slides drop a few notes to free a hand: plan a little more to make up for it
-        plan_t = replace(t, nps=t.nps * scale, peak_nps=t.peak_nps * scale)
+        plan_t = replace(t, nps=t.nps * scale)          # (the busiest stretch stays as planned)
         budgets = planner.note_budgets(analysis, plan_t, overrides, capacity)
         ms = [m for m in placement.place(analysis, t, budgets, mark_each=False)
               if chart_beat(m.grid) >= 0]
@@ -60,12 +61,12 @@ def generate(analysis: dict, *, level: str, slot: int = 5, seed: int = 0,
                             end_limit=end_limit)
 
     def hits(ms):
-        return sum(2 if m.each else 1 for m in ms)
+        return sum(2 if m.each else 1 for m in ms) + sum(k.burst_n - 1 for k in ks if k.kind == "burst")
 
     moments, times, ks = build(1.0)
-    planned = t.nps * (times[-1] - times[0]) if len(times) > 1 else 0
     scale = 1.0
-    for _ in range(2):
+    for _ in range(3):
+        planned = t.nps * (times[-1] - times[0]) * HANDS_DROP_GUESS if len(times) > 1 else 0
         if not hits(moments) or hits(moments) >= 0.97 * planned:
             break
         scale = min(MAX_SCALE, scale * planned / hits(moments))
@@ -73,7 +74,8 @@ def generate(analysis: dict, *, level: str, slot: int = 5, seed: int = 0,
     strong_at = {tm: m.strength >= 1.0 and m.grid % sub == 0 for m, tm in zip(moments, times)}
     placed = hands.assign(times, [m.each for m in moments], seed=seed, kinds=ks, beat=beat,
                           allow_wifi=level_value(level) >= 13.7, strong=lambda tm: strong_at.get(tm, False),
-                          clear_sec=slide_clear_beats(bpm) * beat)
+                          clear_sec=slide_clear_beats(bpm) * beat,
+                          beats=[chart_beat(m.grid) for m in moments])
 
     chart = Chart(bpm)
     notes_out = []
@@ -82,6 +84,16 @@ def generate(analysis: dict, *, level: str, slot: int = 5, seed: int = 0,
             continue
         b0 = chart_beat(m.grid)
         brk = k.brk
+        if k.kind == "burst" and all(x.kind == "tap" for x in group):
+            step = Fraction(1, k.burst_div)
+            for j in sorted({x.sub for x in group}):
+                here = [x for x in group if x.sub == j]
+                for x in here:
+                    chart.add(Tap(b0 + j * step, x.button))
+                tj = tm + float(j * step) * beat
+                notes_out.append({"t": round(tj, 4), "buttons": [x.button for x in here],
+                                  "kinds": ["tap"] * len(here), "end": round(tj, 4), "break": False})
+            continue
         kinds_here, end_t = [], tm
         for p in group:
             if p.kind == "hold":
