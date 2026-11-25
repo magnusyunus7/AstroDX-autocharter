@@ -113,44 +113,29 @@ def test_detect_timing_route(client, tmp_path):
     assert client.get(f"/api/projects/{pid}").json()["timing"] is None
 
 
-def test_analyze_requires_confirmed_timing_and_caches(client, tmp_path):
-    from tools.make_test_song import make, write_mp3
-    mp3 = tmp_path / "a.mp3"
-    write_mp3(make(150, 1.0, 12, seed=4), mp3)
-    pid = upload(client, mp3).json()["id"]
-    assert client.post(f"/api/projects/{pid}/analyze").status_code == 400
-    client.put(f"/api/projects/{pid}/timing", json={"bpm": 150, "first": 1.0})
-    r = client.post(f"/api/projects/{pid}/analyze")
-    assert r.status_code == 200, r.text
-    d = r.json()
-    assert d["bpm"] == 150 and set(d["stems"]) == {"drums", "bass", "melody"}
-    assert len(d["stems"]["drums"]) == d["n_beats"] * d["subdiv"]
-    assert client.post(f"/api/projects/{pid}/analyze").json() == d          # cached
-    client.put(f"/api/projects/{pid}/timing", json={"bpm": 150, "first": 1.4})
-    assert client.post(f"/api/projects/{pid}/analyze").json()["first"] == 1.4  # redone
-
-
-def test_section_level_override(client, mp3):
-    pid = upload(client, mp3).json()["id"]
-    r = client.put(f"/api/projects/{pid}/sections/12/level", json={"level": "peak"})
-    assert r.status_code == 200 and r.json()["section_levels"] == {"12": "peak"}
-    assert client.put(f"/api/projects/{pid}/sections/12/level", json={"level": "loud"}).status_code == 400
-    r = client.put(f"/api/projects/{pid}/sections/12/level", json={"level": None})
-    assert r.json()["section_levels"] == {}
-
-
-def test_generate_and_export(client, tmp_path):
+def test_generate_without_model(client, tmp_path):
+    """Phase C0: no generator until the chart model (C5). The routes still
+    check their input, and export needs a generated chart."""
     from tools.make_test_song import make, write_mp3
     mp3 = tmp_path / "g.mp3"
     write_mp3(make(150, 1.0, 16, seed=7), mp3)
     pid = upload(client, mp3).json()["id"]
-    assert client.post(f"/api/projects/{pid}/generate", json={"level": "14"}).status_code == 400
+    assert client.post(f"/api/projects/{pid}/generate", json={"level": "14"}).status_code == 400  # timing
     client.put(f"/api/projects/{pid}/timing", json={"bpm": 150, "first": 1.0})
-    r = client.post(f"/api/projects/{pid}/generate", json={"level": "13", "slot": 5})
-    assert r.status_code == 200, r.text
-    g = r.json()
-    assert g["stats"]["notes"] > 50 and "&inote_5=" in g["maidata"] and "&lv_5=13" in g["maidata"]
-    assert client.get(f"/api/projects/{pid}/generated").json()["seed"] == g["seed"]
-    z = client.get(f"/api/projects/{pid}/export.zip")
-    assert z.status_code == 200 and z.content[:2] == b"PK"
     assert client.post(f"/api/projects/{pid}/generate", json={"level": "99"}).status_code == 400
+    assert client.post(f"/api/projects/{pid}/generate", json={"level": "13", "slot": 5}).status_code == 503
+    assert client.get(f"/api/projects/{pid}/generated").json() is None
+    assert client.get(f"/api/projects/{pid}/export.zip").status_code == 404
+
+
+def test_old_project_with_section_levels_still_loads(client, mp3):
+    """project.json files written before C0 have a section_levels field."""
+    import json
+    from backend import storage
+    pid = upload(client, mp3).json()["id"]
+    f = storage.project_dir(pid) / "project.json"
+    d = json.loads(f.read_text(encoding="utf-8"))
+    d["section_levels"] = {"12": "peak"}
+    f.write_text(json.dumps(d), encoding="utf-8")
+    r = client.get(f"/api/projects/{pid}")
+    assert r.status_code == 200 and "section_levels" not in r.json()

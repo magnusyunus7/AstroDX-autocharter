@@ -5,13 +5,11 @@ import { Player } from "./player.js";
 import { Timeline } from "./timeline.js";
 import { measureDecoderOffset } from "./decodercheck.js";
 import { TimingControls } from "./timing.js";
-import { AnalysisView } from "./analysis.js";
 import { GeneratePanel } from "./generate.js";
 
 const player = new Player();
 let timeline = null;
 let timing = null;
-let analysis = null;
 let current = null;   // project
 let gen = null;
 let raf = 0;
@@ -22,9 +20,8 @@ export function initProject() {
     onSeek: (t) => { player.seek(t); timeline.draw(); },
   });
   timing = new TimingControls(player, timeline);
-  analysis = new AnalysisView(timeline, timing);
-  gen = new GeneratePanel(player, timeline, timing, analysis);
-  timing.onConfirmed = (p) => { current = p; analysis.load(p); gen.project = p; gen.sync(); };
+  gen = new GeneratePanel(player, timeline, timing);
+  timing.onConfirmed = (p) => { current = p; gen.project = p; gen.sync(); };
   const prevChange = timing.onChange;
   timing.onChange = () => { prevChange(); gen.sync(); };
   player.onstate = () => {
@@ -93,7 +90,6 @@ export async function showProject(id) {
   timeline.markers = [{ t: meta.first_sound, color: "#ffab40", label: "first sound" }];
   timeline.setAudio(peaks, meta, current.duration);
   timing.load(current, meta);
-  analysis.load(current);
   gen.load(current);
 
   const buf = await player.load(bytes);

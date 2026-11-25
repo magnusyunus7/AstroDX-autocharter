@@ -1,8 +1,10 @@
-"""Generate a chart from the confirmed timing + analysis, and export it."""
+"""Generate a chart from the confirmed timing, and export it.
+
+Phase C0: the old rule-based generator is gone; generation comes back with
+the chart model (Phase C5). Until then /generate answers 503."""
 from __future__ import annotations
 
 import json
-import zlib
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -10,14 +12,12 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from backend import config, storage
-from backend.api.analysis import analyze
 from backend.api.projects import get_project_or_404
 from backend.export.astrodx import export_level, safe_name
-from backend.generator.difficulty import LEVELS
-from backend.generator.pipeline import generate
 
 router = APIRouter(tags=["generate"])
 SLOTS = {4: "Expert", 5: "Master", 6: "Re:Master"}
+LEVELS = ("10", "10+", "11", "11+", "12", "12+", "13", "13+", "14", "14+", "15")
 
 
 class GenerateIn(BaseModel):
@@ -37,15 +37,9 @@ def generate_chart(pid: str, body: GenerateIn) -> dict:
         raise HTTPException(400, f"level must be one of {LEVELS}")
     if body.slot not in SLOTS:
         raise HTTPException(400, f"slot must be one of {list(SLOTS)}")
-    analysis = analyze(pid)                      # 400 if timing isn't confirmed; cached otherwise
-    seed = body.seed if body.seed is not None else zlib.crc32(f"{pid}:{body.level}".encode()) % 100000
-    result = generate(analysis, level=body.level, slot=body.slot, seed=seed,
-                      overrides=p.section_levels, title=p.title, artist=p.artist,
-                      duration=p.duration)
-    d = storage.project_dir(pid)
-    (d / "maidata.txt").write_text(result["maidata"], encoding="utf-8", newline="\n")
-    _gen_path(pid).write_text(json.dumps(result), encoding="utf-8")
-    return result
+    if not p.timing or not p.timing.confirmed:
+        raise HTTPException(400, "confirm the timing first")
+    raise HTTPException(503, "no chart model yet: generation comes back in Phase C5")
 
 
 @router.get("/projects/{pid}/generated")

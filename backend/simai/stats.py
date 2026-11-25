@@ -1,6 +1,5 @@
 """Chart statistics: notes per second, busiest 4 s, note-type mix, EACH
-share, longest stream, slides per minute. Used by tools/chart_stats.py and by
-the generator to report how close a generated chart is to its targets."""
+share, longest stream, slides per minute: what a chart contains."""
 from __future__ import annotations
 
 import re

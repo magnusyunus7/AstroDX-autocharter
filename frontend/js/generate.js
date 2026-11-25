@@ -9,11 +9,10 @@ const LOOKAHEAD = 0.12;
 const LANE_H = 16;
 
 export class GeneratePanel {
-  constructor(player, timeline, timing, analysis) {
+  constructor(player, timeline, timing) {
     this.player = player;
     this.tl = timeline;
     this.timing = timing;
-    this.analysis = analysis;
     this.project = null;
     this.result = null;
     this.seed = null;
@@ -67,7 +66,7 @@ export class GeneratePanel {
     const level = $("g-level").value, slot = +$("g-slot").value;
     const seed = reroll ? (this.seed ?? 0) + 1 : null;
     $("g-generate").disabled = $("g-reroll").disabled = true;
-    this._info("Generating… (the first time also runs the analysis)");
+    this._info("Generating…");
     try {
       this.result = await api.generate(p.id, { level, slot, seed });
       this.seed = this.result.seed;
@@ -100,8 +99,7 @@ export class GeneratePanel {
   // ------------------------------------------------------------ notes lane
   _draw(g, { w, h, tl }) {
     if (!this.result || !this.showNotes) return;
-    const lanesTop = h - 3 * 13 - 2;                 // onset lanes start here (analysis.js)
-    const y0 = lanesTop - LANE_H - 4;
+    const y0 = h - LANE_H - 4;                       // lane at the bottom of the waveform
     g.fillStyle = "#0d0e11cc";
     g.fillRect(0, y0 - 2, w, LANE_H + 4);
     g.font = "10px ui-monospace, Consolas, monospace";

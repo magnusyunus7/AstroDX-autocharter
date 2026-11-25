@@ -20,7 +20,7 @@ export class TimingControls {
     this.saved = null;     // {bpm, first} as last saved/confirmed
     this.taps = [];
     this.edits = 0;
-    this.onConfirmed = () => {};  // set by the project view (re-runs analysis)
+    this.onConfirmed = () => {};  // set by the project view
     this.onChange = () => {};     // called whenever bpm/offset/saved state changes        // bumps on every user change (so detection won't overwrite them)
     this.metronome = new Metronome(player, () => ({ bpm: this.bpm, first: this.first, beatsPerBar: BEATS_PER_BAR }));
 
