@@ -5,5 +5,3 @@ samples/
 venv/
 data/
 *.zip
-backend/corpus/
-tools/corpus_stats.py
