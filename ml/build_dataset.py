@@ -16,10 +16,13 @@ shift_ms: how far its notes are moved to line up with the audio, see below),
 <out>/report.json, and a few pictures in <out>/pictures/ (notes drawn over
 the spectrogram) to check by eye.
 
-Sync: a chart whose notes sit clearly off the audio's hits by more than
-SYNC_LIMIT_MS (wrong &first for this mp3, a different edit ...) isn't
-dropped: it gets shift_ms, the measured offset, and training moves its notes
-by that much. Listed in the report as "resynced".
+Sync is decided per song (all its charts share &first and the mp3): the
+song's offset is the median of its charts with a clear answer. If those
+charts agree (within SYNC_AGREE_MS) and the offset is more than SYNC_LIMIT_MS
+from the collection's usual one (wrong &first for this mp3, a different
+edit ...), the charts aren't dropped: they get shift_ms and training moves
+their notes onto the audio. Listed in the report as "resynced". Songs whose
+charts disagree are left as they are and listed as "sync unclear".
 
 Safe to stop and run again: finished songs are skipped. Refuses to start if
 another build is running on the same folder. Run with --summary-only to redo
@@ -52,6 +55,7 @@ EXCLUDE = ("02.5. 舞萌中国", "25A. KALEIDXSCOPE Playlists", "legacy_maidata 
 VAL, TEST = 5, 5                       # percent of song titles
 SYNC_LIMIT_MS = 30.0                   # further than this from the usual offset: resynced
 SYNC_SHARP = 4.0                       # only judge sync when the answer is this clear
+SYNC_AGREE_MS = 15.0                   # a song's clear charts must agree this closely to resync it
 AUDIO_SLACK = 1.0                      # the last note may be this far past the audio's end (s)
 FORMAT = 1                             # bump when the song files change
 
@@ -136,7 +140,7 @@ def build_song(job) -> dict:
                 continue
             times = np.array(sorted({song["first"] + r["chart"].seconds(n.beat) for n in r["chart"].notes}))
             r["last_note"] = round(float(times[-1]), 3)
-            r.update(sync.chart_offset(env, fps, times))
+            r.update(sync.chart_offset(env, fps, times, beat=60.0 / r["chart"].tempo[0][1]))
             if r["use"] and r["last_note"] > rec["duration"] + AUDIO_SLACK:
                 r.update(use=False, reason=f"audio ends at {rec['duration']:.1f}s, last note at {r['last_note']:.1f}s")
         rec["bpm_test"] = bpm_test(y, song, recs) if do_bpm else None
@@ -170,17 +174,24 @@ def summarize(out: Path) -> dict:
     good = [s for s in songs if s.get("ok")]
 
     # usual sync offset, from charts with a clear answer
-    clear = [c["offset_ms"] for s in good for c in s["charts"]
-             if c.get("offset_ms") is not None and c.get("sharpness", 0) >= SYNC_SHARP]
-    usual = float(np.median(clear)) if clear else 0.0
+    def clear(c):
+        return c.get("offset_ms") is not None and c.get("sharpness", 0) >= SYNC_SHARP and not c.get("edge")
 
+    usual = float(np.median([c["offset_ms"] for s in good for c in s["charts"] if clear(c)] or [0.0]))
+    unclear = []
     seen, rows = {}, []
     for s in good:
+        offs = [c["offset_ms"] for c in s["charts"] if clear(c)]
+        shift = 0.0
+        if offs:
+            song_off = float(np.median(offs))
+            if abs(song_off - usual) > SYNC_LIMIT_MS:
+                if max(abs(o - song_off) for o in offs) <= SYNC_AGREE_MS:
+                    shift = round(song_off - usual, 1)               # move the notes onto the audio's hits
+                else:
+                    unclear.append({"song": f"{s['version']}/{s['song']}", "offsets_ms": offs})
         for c in s["charts"]:
-            c = dict(c, shift_ms=0.0)
-            if c["use"] and c.get("offset_ms") is not None and c.get("sharpness", 0) >= SYNC_SHARP \
-                    and abs(c["offset_ms"] - usual) > SYNC_LIMIT_MS:
-                c["shift_ms"] = round(c["offset_ms"] - usual, 1)    # move the notes onto the audio's hits
+            c = dict(c, shift_ms=shift if c["use"] else 0.0)
             if c["use"] and "hash" in c:                    # the same song's chart copied into another version
                 key = (s["title_key"], c["hash"])
                 if key in seen:
@@ -198,7 +209,7 @@ def summarize(out: Path) -> dict:
     bt = [s["bpm_test"] for s in good if s.get("bpm_test")]
     rel = Counter(b["relation"] for b in bt)
     ph = np.array([abs(b["phase_ms"]) for b in bt if b["phase_ms"] is not None])
-    offs = np.array([r["offset_ms"] for r in used if r.get("offset_ms") is not None and r["sharpness"] >= SYNC_SHARP])
+    offs = np.array([r["offset_ms"] - r["shift_ms"] for r in used if clear(r)])
     tok = np.array([r["token_count"] for r in used])
     report = {
         "songs": len(songs), "songs_failed": [{"song": f"{s['version']}/{s['song']}", "error": s.get("error")}
@@ -219,6 +230,7 @@ def summarize(out: Path) -> dict:
                      "phase_within_15ms": round(float(np.mean(ph <= 15)), 3) if len(ph) else None},
         "tokens_per_chart": {"median": int(np.median(tok)) if len(tok) else 0,
                              "p99": int(np.percentile(tok, 99)) if len(tok) else 0},
+        "sync_unclear": unclear,
         "resynced": sorted(({"chart": f"{r['version']}/{r['song']} slot {r['slot']}", "shift_ms": r["shift_ms"]}
                             for r in rows if r["shift_ms"]), key=lambda x: -abs(x["shift_ms"])),
     }
@@ -324,7 +336,7 @@ def main() -> None:
         print(f"  used by era {rep['used_by_era']}, by source {rep['used_by_source']}")
         print(f"  sync: usual offset {rep['sync']['usual_offset_ms']} ms; of {rep['sync']['charts_judged']} "
               f"clear charts, {rep['sync']['within_10ms']} within 10 ms, {rep['sync']['within_20ms']} within 20 ms; "
-              f"{len(rep['resynced'])} charts resynced (moved onto the audio, listed in the report)")
+              f"{len(rep['resynced'])} charts resynced, {len(rep['sync_unclear'])} songs unclear (listed in the report)")
         print(f"  BPM detector: {rep['bpm_test']}")
         print(f"  tokens per chart: {rep['tokens_per_chart']}")
         for f in rep["songs_failed"][:10]:

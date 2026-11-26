@@ -49,7 +49,30 @@ def load_model(device):
     proc = Wav2Vec2FeatureExtractor.from_pretrained(MODEL, trust_remote_code=True)
     if device == "cuda":
         model = model.half()
+    model.config.output_hidden_states = True
+    # Newer transformers versions don't always pass output_hidden_states through
+    # MERT's own code (hidden_states comes back None). As a fallback, catch
+    # every transformer layer's output directly.
+    model._caught = []
+    layers = getattr(getattr(model, "encoder", None), "layers", None)
+    if layers is not None:
+        for layer in layers:
+            layer.register_forward_hook(
+                lambda mod, inp, out: model._caught.append(out[0] if isinstance(out, tuple) else out))
     return model, proc, torch
+
+
+def layer_outputs(model, x, torch):
+    """Every layer's output for input x: [(1, frames, 768), ...]."""
+    model._caught.clear()
+    with torch.no_grad():
+        out = model(x, output_hidden_states=True, return_dict=True)
+    hs = getattr(out, "hidden_states", None)
+    if hs:
+        return list(hs)
+    if model._caught:
+        return list(model._caught)
+    raise RuntimeError("MERT returned no layer outputs (check the transformers version)")
 
 
 def embed(y: np.ndarray, model, proc, torch, device) -> np.ndarray:
@@ -62,8 +85,7 @@ def embed(y: np.ndarray, model, proc, torch, device) -> np.ndarray:
         x = proc(y[a:b], sampling_rate=SR, return_tensors="pt")["input_values"].to(device)
         if device == "cuda":
             x = x.half()
-        with torch.no_grad():
-            hs = model(x, output_hidden_states=True).hidden_states
+        hs = layer_outputs(model, x, torch)
         h = torch.stack(hs).mean(0)[0].float().cpu().numpy()     # (frames, 768)
         f_a = int(round(a / SR * FPS))
         lo = int(round(s / SR * FPS)) - f_a                         # drop the context frames
@@ -103,6 +125,8 @@ def main() -> None:
         t0 = time.time()
         y = audio.decode(path_of(r), sr=SR)
         e = embed(y, model, proc, torch, device)
+        x = proc(y[:SR * 5], sampling_rate=SR, return_tensors="pt")["input_values"].to(device)
+        print(f"layers averaged: {len(layer_outputs(model, x.half() if device == 'cuda' else x, torch))}")
         print(f"{r['version']}/{r['song']}: {len(y) / SR:.1f} s of audio -> {e.shape} features in "
               f"{time.time() - t0:.1f} s (expected about {len(y) / SR * FPS:.0f} x 768); "
               f"values {e.mean():.3f} +- {e.std():.3f}, NaN: {bool(np.isnan(e).any())}")

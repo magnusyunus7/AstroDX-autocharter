@@ -71,3 +71,15 @@ def test_small_build(tmp_path):
     assert rep["bpm_test"]["relation"] == {"exact": 4}
     assert rep["charts_used"] == 4                                      # same notes, different songs: all kept
     assert build_dataset.verify(out) == 0
+
+
+def test_sync_ignores_half_beat_look_alikes():
+    """Quarter-note chart over a song whose off-beats are louder: the answer
+    must stay near 0, not half a beat away (Reach For The Stars, 203 BPM)."""
+    fps, beat = 344.5, 60 / 203
+    env = np.zeros(int(60 * fps))
+    for k in range(5, 190):
+        env[int(round(k * beat * fps))] = 0.6                          # on-beat hits
+        env[int(round((k + 0.5) * beat * fps))] = 1.0                  # louder off-beats
+    r = sync.chart_offset(env, fps, np.arange(5, 190) * beat, beat=beat)
+    assert r["edge"] or abs(r["offset_ms"]) < 5
