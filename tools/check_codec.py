@@ -143,6 +143,9 @@ def check_song(args):
             out.append({"slot": slot, "skip": "empty"})
             continue
         chart, issues, problem, view, moved = check_chart(c["body"], meta["wholebpm"])
+        if not problem and not chart.notes:                           # placeholder like "(280)E"
+            out.append({"slot": slot, "skip": "empty"})
+            continue
         r = {"slot": slot, "level": c["level"], "problem": problem}
         if not problem:
             r.update(notes=len(chart.notes), bpm_changes=len(chart.tempo) > 1, info=dict(issues.count),
