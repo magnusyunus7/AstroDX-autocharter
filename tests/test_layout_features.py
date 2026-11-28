@@ -84,10 +84,9 @@ def test_fit_tables_end_to_end(tmp_path: Path):
         mel = fake_mel(60.0, calm, seed=i)
         tok = np.array(ids(encode(_chart(58.0, calm))), np.int16)
         np.savez(data / "songs" / f"{sid}.npz", mel=mel, tokens=tok, first=np.float64(0.0), meta="{}")
-        for split in ("train", "val") if i < 5 else ("val",):
-            if split == "val" and i < 4:
-                continue
-            rows.append({"id": sid, "version": "x", "song": sid, "slot": 5, "split": split, "use": True,
+        jobs = [("train", 5)] if i < 4 else [("train", 5), ("val", 5)] if i == 4 else [("val", 4), ("val", 5)]
+        for split, slot in jobs:
+            rows.append({"id": sid, "version": "x", "song": sid, "slot": slot, "split": split, "use": True,
                          "level_value": 13.5, "tempo": [["0", BPM]], "shift_ms": 0.0,
                          "token_start": 0, "token_count": int(len(tok))})
     (data / "charts.jsonl").write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
@@ -106,3 +105,17 @@ def test_fit_tables_end_to_end(tmp_path: Path):
     assert rep["charts"] >= 1
     calm = rep["calm_bars_density"]
     assert calm["table"] < calm["every_peak"]                     # the table drops in calm parts, peaks don't
+    assert calm["model"] < calm["every_peak"]
+    assert len(t["model"]["dense"]) == F.N_INPUTS
+    assert rep["r_bar"]["model"] is not None
+    assert rep["r_bar"]["human"] is not None                      # s5 has two charts: they are compared
+
+
+def test_bar_matrix_and_predict_shapes():
+    mel = fake_mel(40.0, calm=(16.0, 24.0))
+    cv = F.curves(mel)
+    t0 = np.arange(0, 40, 2.0)
+    X = F.bar_matrix(cv, t0, t0 + 2.0, np.arange(len(t0)) % 5)
+    assert X.shape == (len(t0), F.N_INPUTS) and np.all(X[:, 0] == 1)
+    w = np.zeros(F.N_INPUTS); w[0] = 1.0
+    assert np.allclose(F.predict(w, X, 1), 1.0)

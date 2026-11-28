@@ -15,6 +15,10 @@ What it learns (from training charts; validation charts only for the report):
             how busy the bar is meant to be.
   flow      how one hand move follows the previous one (stairs, trills,
             spins ...), as in ml/score.flow_model.
+  model     a small linear model of bar density from more measures than the
+            table (strong hits per bar, drums/bass, brightness, the
+            surrounding section, position in the song); see
+            backend/layout/features.bar_matrix. Used smoothed over 3 bars.
 
 Difficulty groups: basic (below 7), light (7 to 9), medium (10 to 12),
 dense (13 and harder).
@@ -23,7 +27,9 @@ The report (also printed) checks the density table on validation charts:
 does the predicted bar density follow the real chart better than "a note on
 every strong peak" (the old way)? r = correlation per chart, averaged;
 "calm bars" = the song's quietest quarter of bars, density compared to the
-chart's average (real charts drop a lot there).
+chart's average (real charts drop a lot there). "human" = the same song's
+other chart (nearest difficulty slot) as the prediction: how much two real
+charts agree, the most a prediction can be expected to reach.
 """
 from __future__ import annotations
 
@@ -52,6 +58,8 @@ DENS_EDGES = (0.5, 1.0, 1.5)          # bar density (vs chart average) -> 4 bins
 BPM_EDGES = (120.0, 160.0, 200.0)     # -> 4 BPM bins for the average density
 PEAK = 0.75                           # "every peak" baseline: slots stronger than 75% of the song's slots
 MIN_CELL = 30                         # fewer bars than this in a cell -> fall back to the loudness-only row
+RIDGE = 10.0                          # model fit: weight shrinkage
+MAX_RATIO = 3.0                       # model fit: bars busier than 3x average count as 3x
 
 
 def group_of(level: float) -> int:
@@ -108,8 +116,10 @@ def one_chart(row, tok_all, cv):
     strength = F.percentile(F.slot_strength(cv, st))
     peaks = (strength >= PEAK).reshape(nb, 16).sum(1)
 
+    X = F.bar_matrix(cv, bt[:-1], bt[1:], peaks)
     mean = moments.mean()
     return {
+        "X": X.astype(np.float32), "b0": b0,
         "ratio": moments / mean, "moments": moments, "empty": moments == 0,
         "hold": holds / np.maximum(1, n_notes), "slide": slides / np.maximum(1, n_notes),
         "each": each / np.maximum(1, moments),
@@ -138,8 +148,8 @@ def one_song(job):
         except Exception as e:                                       # noqa: BLE001
             return sid, None, f"{r['slot']}: {type(e).__name__}: {e}"
         if c is not None:
-            c.update(split=r["split"], group=group_of(r["level_value"]), level=r["level_value"],
-                     name=f"{r['version']}/{r['song']} slot {r['slot']}")
+            c.update(split=r["split"], group=group_of(r["level_value"]), level=r["level_value"], slot=r["slot"],
+                     song_key=sid, name=f"{r['version']}/{r['song']} slot {r['slot']}")
             out.append(c)
     return sid, out, None
 
@@ -152,6 +162,7 @@ def fit(charts):
     rows_ = np.zeros((G, B, 6)); row_n = np.zeros((G, B))
     slot_tot = np.zeros((G, 4, 4, B)); slot_hit = np.zeros((G, 4, 4, B))
     flow = np.ones((G, 8, 8))
+    XtX = np.zeros((G, F.N_INPUTS, F.N_INPUTS)); Xty = np.zeros((G, F.N_INPUTS))
     per_bar = defaultdict(list)
     off = np.zeros((G, 2))
     for c in charts:
@@ -169,10 +180,13 @@ def fit(charts):
             flow[g, x + 3, y + 3] += 1
         per_bar[(g, bpm_bin(c["bpm"]))].append(c["mean_per_bar"])
         off[g] += (c["offgrid"], c["n_moments"])
+        X = c["X"].astype(np.float64)
+        XtX[g] += X.T @ X
+        Xty[g] += X.T @ np.minimum(c["ratio"], MAX_RATIO)
 
     tables = {"version": 1, "groups": dict(zip(GROUPS, GROUP_FROM)), "bins": B,
               "dens_edges": list(DENS_EDGES), "bpm_edges": list(BPM_EDGES), "metric": list(F.METRIC),
-              "density": {}, "slots": {}, "flow": {}}
+              "density": {}, "slots": {}, "flow": {}, "model": {}, "model_smooth": 1}
     for g, name in enumerate(GROUPS):
         mean_cell = cells[g] / np.maximum(1, cell_n[g])[..., None]
         mean_row = rows_[g] / np.maximum(1, row_n[g])[..., None]
@@ -191,6 +205,8 @@ def fit(charts):
         p = (slot_hit[g] + 0.5) / (slot_tot[g] + 1.0)
         tables["slots"][name] = {"p": np.round(p, 4).tolist(), "n": slot_tot[g].astype(int).tolist()}
         tables["flow"][name] = np.round(np.log(flow[g] / flow[g].sum(1, keepdims=True)), 4).tolist()
+        reg = RIDGE * np.eye(F.N_INPUTS); reg[0, 0] = 0.0
+        tables["model"][name] = np.round(np.linalg.solve(XtX[g] + reg + 1e-9 * np.eye(F.N_INPUTS), Xty[g]), 5).tolist()
     return tables
 
 
@@ -198,32 +214,59 @@ def _r(a, b):
     return float(np.corrcoef(a, b)[0, 1]) if a.std() > 0 and b.std() > 0 else None
 
 
+def _other(c, charts_by_song):
+    """The same song's other chart nearest in difficulty slot, on the bars both cover."""
+    others = [o for o in charts_by_song.get(c["song_key"], []) if o is not c and o["slot"] != c["slot"]]
+    if not others:
+        return None
+    o = min(others, key=lambda o: (abs(o["slot"] - c["slot"]), o["slot"]))
+    lo, hi = max(c["b0"], o["b0"]), min(c["b0"] + len(c["ratio"]), o["b0"] + len(o["ratio"]))
+    if hi - lo < 8:
+        return None
+    full = np.full(len(c["ratio"]), np.nan)
+    full[lo - c["b0"]:hi - c["b0"]] = o["ratio"][lo - o["b0"]:hi - o["b0"]]
+    return full
+
+
 def report(tables, charts):
+    by_song = defaultdict(list)
+    for c in charts:
+        by_song[c["song_key"]].append(c)
     out = {}
     for g, name in enumerate(GROUPS):
         ratio = np.array(tables["density"][name]["ratio"])
-        rb, rp, rb4, rp4, calm = [], [], [], [], []
+        w = np.array(tables["model"][name])
+        ways = ("table", "model", "every_peak", "human")
+        r1, r4 = defaultdict(list), defaultdict(list)
+        calm = defaultdict(list)
         for c in (c for c in charts if c["group"] == g):
-            pred = ratio[c["loud_bin"], c["hit_bin"]]
-            real, base = c["ratio"], c["peaks"]
-            a, b = _r(real, pred), _r(real, base)
-            if a is not None and b is not None:
-                rp.append(a); rb.append(b)
-            n4 = len(real) // 4 * 4
-            if n4 >= 16:
-                s = lambda x: x[:n4].reshape(-1, 4).sum(1)                       # noqa: E731
-                a, b = _r(s(real), s(pred)), _r(s(real), s(base))
-                if a is not None and b is not None:
-                    rp4.append(a); rb4.append(b)
+            real = c["ratio"]
+            preds = {"table": ratio[c["loud_bin"], c["hit_bin"]],
+                     "model": F.predict(w, c["X"].astype(np.float64), tables["model_smooth"]),
+                     "every_peak": c["peaks"], "human": _other(c, by_song)}
             q = c["loud"] < 0.25
-            if q.sum() >= 2 and base.mean() > 0:
-                calm.append((real[q].mean(), pred[q].mean() / pred.mean(), base[q].mean() / base.mean()))
-        calm = np.array(calm) if calm else np.zeros((0, 3))
+            for k, p in preds.items():
+                if p is None:
+                    continue
+                ok = ~np.isnan(p)
+                a = _r(real[ok], p[ok])
+                if a is not None:
+                    r1[k].append(a)
+                n4 = ok.sum() // 4 * 4
+                if n4 >= 16:
+                    s4 = lambda x: x[ok][:n4].reshape(-1, 4).sum(1)                 # noqa: E731
+                    a = _r(s4(real), s4(p))
+                    if a is not None:
+                        r4[k].append(a)
+                if k != "human" and (q & ok).sum() >= 2 and p[ok].mean() > 0:
+                    calm[k].append(p[q & ok].mean() / p[ok].mean())
+            if q.sum() >= 2:
+                calm["real"].append(real[q].mean())
         out[name] = {
-            "charts": len(rp),
-            "r_bar": {"table": _avg(rp), "every_peak": _avg(rb)},
-            "r_4bars": {"table": _avg(rp4), "every_peak": _avg(rb4)},
-            "calm_bars_density": {"real": _avg(calm[:, 0]), "table": _avg(calm[:, 1]), "every_peak": _avg(calm[:, 2])},
+            "charts": len(r1["table"]),
+            "r_bar": {k: _avg(r1[k]) for k in ways},
+            "r_4bars": {k: _avg(r4[k]) for k in ways},
+            "calm_bars_density": {k: _avg(calm[k]) for k in ("real", "table", "model", "every_peak")},
         }
     return out
 
@@ -268,13 +311,17 @@ def main() -> None:
     tables["report"]["failed_songs"] = failed[:50]
     args.out.write_text(json.dumps(tables, ensure_ascii=False), encoding="utf-8")
 
-    print("\n group    charts   r per bar (table / every peak)   r per 4 bars        calm bars (real / table / every peak)")
+    print("\n correlation with the real chart's bar density (per bar | per 4 bars)")
+    print(" group    charts    table        model        every peak   human")
     for name in GROUPS:
         x = tables["report"][name]
-        c = x["calm_bars_density"]
-        print(f" {name:<8} {x['charts']:>5}    {x['r_bar']['table']!s:>6} / {x['r_bar']['every_peak']!s:<6}"
-              f"                 {x['r_4bars']['table']!s:>6} / {x['r_4bars']['every_peak']!s:<6}"
-              f"     {c['real']!s:>5} / {c['table']!s:>5} / {c['every_peak']!s:>5}")
+        cells = "  ".join(f"{x['r_bar'][k]!s:>5}|{x['r_4bars'][k]!s:<5}" for k in ("table", "model", "every_peak", "human"))
+        print(f" {name:<8} {x['charts']:>5}    {cells}")
+    print("\n calm bars (song's quietest quarter), density vs the chart's average")
+    print(" group    real   table  model  every peak")
+    for name in GROUPS:
+        c = tables["report"][name]["calm_bars_density"]
+        print(f" {name:<8} {c['real']!s:>5}  {c['table']!s:>5}  {c['model']!s:>5}  {c['every_peak']!s:>5}")
     print("\n average moments per bar by BPM (<120, 120-160, 160-200, 200+):")
     for name in GROUPS:
         d = tables["density"][name]

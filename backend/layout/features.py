@@ -24,6 +24,8 @@ import numpy as np
 
 FPS = 22050 / 220                 # mel frames per second (ml/audio.FPS)
 LOW_BANDS = 12                    # about 30-250 Hz: kick / bass hits
+HIGH_FROM = 50                    # bands 50+: about 3 kHz and up (cymbals, brightness)
+CONTEXT = 2                       # bars either side for the section context
 SLOT_WIN = 2                      # frames either side when reading a slot's hit (about 20 ms)
 BINS = 5
 METRIC = ("downbeat", "beat", "8th", "16th")
@@ -33,10 +35,11 @@ def curves(mel_db: np.ndarray) -> dict[str, np.ndarray]:
     """Frame curves from a (frames, bands) dB spectrogram:
     loud  mean level (dB)
     flux  hit strength: how much the spectrum rises from the frame before
-    low   the same, low bands only (drums / bass)"""
+    low   the same, low bands only (drums / bass)
+    high  level of the high bands (dB): cymbals, brightness"""
     m = np.asarray(mel_db, dtype=np.float32)
     d = np.maximum(np.diff(m, axis=0, prepend=m[:1]), 0.0)
-    return {"loud": m.mean(1), "flux": d.mean(1), "low": d[:, :LOW_BANDS].mean(1)}
+    return {"loud": m.mean(1), "flux": d.mean(1), "low": d[:, :LOW_BANDS].mean(1), "high": m[:, HIGH_FROM:].mean(1)}
 
 
 def percentile(x: np.ndarray) -> np.ndarray:
@@ -94,3 +97,42 @@ def metric_class(slot16: np.ndarray) -> np.ndarray:
     """Place in the bar for 16th slots 0..15: 0 downbeat, 1 beat, 2 8th, 3 16th."""
     s = np.asarray(slot16) % 16
     return np.where(s == 0, 0, np.where(s % 4 == 0, 1, np.where(s % 2 == 0, 2, 3)))
+
+
+def _smooth(x: np.ndarray, k: int) -> np.ndarray:
+    """Mean over k bars either side (edges use what is there)."""
+    x = np.asarray(x, dtype=np.float64)
+    if k <= 0 or len(x) == 0:
+        return x
+    cs = np.concatenate([np.zeros((1,) + x.shape[1:]), np.cumsum(x, axis=0)])
+    i = np.arange(len(x))
+    lo, hi = np.maximum(0, i - k), np.minimum(len(x), i + k + 1)
+    return (cs[hi] - cs[lo]) / (hi - lo).reshape((-1,) + (1,) * (x.ndim - 1))
+
+
+def bar_matrix(cv: dict, t0: np.ndarray, t1: np.ndarray, peaks: np.ndarray) -> np.ndarray:
+    """Inputs of the bar density model, one row per bar. peaks: strong hits per
+    bar (16th slots above the song's 75th percentile of hit strength).
+    Every measure is a percentile within the song, so only *relative*
+    busyness counts. Columns: 1, the 5 measures (loudness, hit strength,
+    drums/bass, brightness, strong hits), their squares, the same averaged
+    over the surrounding bars (the section), bar minus section, and the
+    position in the song (and its square)."""
+    f0 = np.floor(np.asarray(t0) * FPS).astype(np.int64)
+    f1 = np.ceil(np.asarray(t1) * FPS).astype(np.int64)
+    loud = _span_mean(cv["loud"], f0, f1)
+    low = _span_mean(cv["low"], f0, f1)
+    hit = _span_mean(cv["flux"], f0, f1) + low
+    high = _span_mean(cv["high"], f0, f1)
+    P = np.stack([percentile(x) for x in (loud, hit, low, high, np.asarray(peaks, dtype=np.float64))], 1)
+    ctx = _smooth(P, CONTEXT)
+    pos = np.linspace(0.0, 1.0, len(P))[:, None]
+    return np.concatenate([np.ones((len(P), 1)), P, P ** 2, ctx, P - ctx, pos, pos ** 2], 1)
+
+
+N_INPUTS = 1 + 5 * 4 + 2
+
+
+def predict(w: np.ndarray, X: np.ndarray, smooth: int = 1) -> np.ndarray:
+    """Bar density (times the chart's average) from bar_matrix rows."""
+    return np.maximum(0.0, _smooth(X @ np.asarray(w), smooth))
