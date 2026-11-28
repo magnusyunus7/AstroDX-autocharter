@@ -136,3 +136,14 @@ N_INPUTS = 1 + 5 * 4 + 2
 def predict(w: np.ndarray, X: np.ndarray, smooth: int = 1) -> np.ndarray:
     """Bar density (times the chart's average) from bar_matrix rows."""
     return np.maximum(0.0, _smooth(X @ np.asarray(w), smooth))
+
+
+def mel(y: np.ndarray, sr: int = 22050) -> np.ndarray:
+    """(frames, 80) log-mel in dB like the dataset (ml/audio.mel): mono
+    samples at 22050 Hz, 10 ms hop, relative to the loudest frame."""
+    import librosa
+    if sr != 22050:
+        y = librosa.resample(np.asarray(y, dtype=np.float32), orig_sr=sr, target_sr=22050)
+    S = librosa.feature.melspectrogram(y=np.asarray(y, dtype=np.float32), sr=22050, n_fft=2048, hop_length=220,
+                                       n_mels=80, fmin=30.0, fmax=11025.0, power=2.0)
+    return librosa.power_to_db(S, ref=np.max, top_db=80.0).T.astype(np.float16)
