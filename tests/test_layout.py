@@ -113,3 +113,20 @@ def test_tables_have_every_density():
     for d in DENSITIES:
         assert d in t["model"] and d in t["flow"] and d in t["slots"]
     assert set(rhythm.LEVEL_OF) == set(DENSITIES)
+
+
+@pytest.mark.parametrize("density", ["light", "dense"])
+def test_holds_and_slides_with_the_other_hand_playing(mel, density):
+    lay = make_layout(mel, BPM, FIRST, DUR, density, seed=2)
+    long = [n for n in lay.notes if isinstance(n, (Hold, Slide))]
+    assert len(long) >= 0.03 * len(lay.notes)                # not just taps
+    assert lay.stats["dropped"] == 0 and lay.stats["checker_fixes"] == 0
+    side = lambda b: b <= 4                                   # noqa: E731
+    for n in long:
+        b = n.start if isinstance(n, Slide) else n.button
+        end = n.beat + (1 + n.paths[0].segments[0].length if isinstance(n, Slide) else n.length)
+        under = [x for x in lay.notes if n.beat < x.beat < end]
+        assert len({x.beat for x in under}) == len(under)    # only single notes under it
+        for x in under:
+            xb = x.start if isinstance(x, Slide) else x.button
+            assert side(xb) != side(b)                       # played by the other hand

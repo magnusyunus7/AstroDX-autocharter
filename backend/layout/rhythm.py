@@ -9,10 +9,11 @@
   3. In each bar, take the best 16th slots: how likely real charts at this
      difficulty put a note there (place in the bar x hit strength x how busy
      the bar is), never closer than the difficulty allows.
-  4. Decide which moments are EACH, holds or slides (shares from the tables;
-     holds where the sound carries on, slides only where there is a long
-     enough gap; nothing else is played during either, so both hands stay
-     simple).
+  4. Decide which moments are EACH, holds or slides (shares from the tables).
+     Holds go where the sound carries on. While a hold or slide is going the
+     other hand plays the notes under it alone, so those must be single
+     notes at least ONE_HAND_SEC apart (no EACH under a hold/slide, none just
+     after a slide ends); a candidate whose notes don't allow that isn't used.
 
 Times are 16th slots from beat 0 (the first downbeat): slot s = beat s / 4.
 """
@@ -33,7 +34,7 @@ MIN_GAP_SLOTS = {"basic": 4, "light": 2, "medium": 1, "dense": 1}
 MIN_GAP_SEC = {"basic": 0.25, "light": 0.18, "medium": 0.12, "dense": 0.085}
 EACH_ROOM_SEC = ONE_HAND_SEC      # an EACH needs this much room before and after
 EACH_SHARE = 0.75                 # of the real charts' EACH share: a layout leaves some for the creator
-HOLD_MIN_BEATS = Fraction(1, 2)
+HOLD_BEATS = (Fraction(4), Fraction(3), Fraction(2), Fraction(3, 2), Fraction(1), Fraction(1, 2))
 SUSTAIN_DB = 6.0                  # a hold where the sound stays within 6 dB over the gap
 SLIDE_TRAVEL = (Fraction(1, 2), Fraction(1), Fraction(3, 2), Fraction(2))   # beats the star moves
 LEVEL_OF = {"basic": "5", "light": "8", "medium": "11", "dense": "13"}
@@ -46,6 +47,7 @@ class Moment:
     each: bool = False
     hold: Fraction = Fraction(0)  # beats (0 = tap)
     slide: Fraction = Fraction(0) # star travel beats (0 = no slide)
+    under: int | None = None      # index of the hold/slide this note is played under (by the other hand)
 
     @property
     def beat(self) -> Fraction:
@@ -158,41 +160,82 @@ def _kinds(moments: list[Moment], ratio, tables, g, bpm, cv, first, beat_s) -> N
     if not moments:
         return
     clear = Fraction(slide_clear_beats(bpm)).limit_denominator(4)
+    clear_s = float(clear) * beat_s
     t = np.array([first + m.slot * beat_s / 4 for m in moments])
     gap_before = np.diff(t, prepend=-1e9)
     gap_after = np.append(np.diff(t), 1e9)
-    nxt = [moments[i + 1].slot if i + 1 < len(moments) else None for i in range(len(moments))]
 
     by_bar: dict[int, list[int]] = {}
     for i, m in enumerate(moments):
         by_bar.setdefault(m.slot // 16, []).append(i)
 
-    each_carry = hold_carry = slide_carry = 0.0
+    # EACH: strongest moments on beats with room around them
+    each_carry = 0.0
     for b, ids in sorted(by_bar.items()):
-        r = float(ratio[b])
-        # EACH: strongest moments on beats with room around them
-        each_carry += EACH_SHARE * _cell(tables, g, "each", r) * len(ids)
+        each_carry += EACH_SHARE * _cell(tables, g, "each", float(ratio[b])) * len(ids)
         cand = sorted((i for i in ids if gap_before[i] >= EACH_ROOM_SEC and gap_after[i] >= EACH_ROOM_SEC
                        and moments[i].slot % 4 == 0), key=lambda i: -moments[i].strength)
         while each_carry >= 0.5 and cand:
             moments[cand.pop(0)].each = True
             each_carry -= 1.0
-        # holds and slides only into an empty gap; nothing else plays meanwhile
+        each_carry = min(each_carry, 1.0)
+
+    def covered(i: int, until: float, no_each_until: float) -> list[int] | None:
+        """Moments the other hand must play alone while moment i's hold/slide
+        lasts (until), or None if that isn't possible."""
+        out, prev = [], None
+        for j in range(i + 1, len(moments)):
+            if t[j] >= max(until, no_each_until) - 1e-9:
+                break
+            m = moments[j]
+            if t[j] < no_each_until - 1e-9 and m.each:
+                return None
+            if t[j] >= until - 1e-9:
+                continue                                          # after it ends: only "no EACH" applies
+            if m.each or m.hold or m.slide or m.under is not None:
+                return None
+            if prev is not None and t[j] - prev < ONE_HAND_SEC - 1e-9:
+                return None
+            out.append(j)
+            prev = t[j]
+        return out
+
+    hold_carry = slide_carry = 0.0
+    for b, ids in sorted(by_bar.items()):
+        r = float(ratio[b])
         hold_carry += _cell(tables, g, "hold", r) * len(ids)
         slide_carry += _cell(tables, g, "slide", r) * len(ids)
         for i in sorted(ids, key=lambda i: -moments[i].strength):
             m = moments[i]
-            if m.each or nxt[i] is None:
+            if m.each or m.under is not None or (hold_carry < 0.5 and slide_carry < 0.5):
                 continue
-            gap = Fraction(nxt[i] - m.slot, 4)                     # beats to the next moment
-            room = gap - clear
-            if slide_carry >= 0.5 and room >= 1 + SLIDE_TRAVEL[0]:
-                m.slide = max(x for x in SLIDE_TRAVEL if x <= room - 1)
-                slide_carry -= 1.0
-            elif hold_carry >= 0.5 and room >= HOLD_MIN_BEATS and _sustained(cv, t[i], t[i] + float(gap) * beat_s):
-                m.hold = Fraction(math.floor(room * 2), 2)
-                hold_carry -= 1.0
-        each_carry = min(each_carry, 1.0); hold_carry = min(hold_carry, 1.0); slide_carry = min(slide_carry, 1.0)
+            if any(moments[k].under == i for k in range(len(moments))):
+                continue
+            done = False
+            if slide_carry >= 0.5 and m.slot % 2 == 0:
+                for tr in reversed(SLIDE_TRAVEL):
+                    end = t[i] + float(1 + tr) * beat_s
+                    cov = covered(i, end + clear_s, end + clear_s)
+                    if cov is not None:
+                        m.slide = tr
+                        for j in cov:
+                            moments[j].under = i
+                        slide_carry -= 1.0
+                        done = True
+                        break
+            if not done and hold_carry >= 0.5:
+                for hl in HOLD_BEATS:
+                    end = t[i] + float(hl) * beat_s
+                    if not _sustained(cv, t[i], end):
+                        continue
+                    cov = covered(i, end + ONE_HAND_SEC, end + ONE_HAND_SEC)   # the hand lets go first
+                    if cov is not None:
+                        m.hold = hl
+                        for j in cov:
+                            moments[j].under = i
+                        hold_carry -= 1.0
+                        break
+        hold_carry = min(hold_carry, 1.0); slide_carry = min(slide_carry, 1.0)
 
 
 def _sustained(cv, t0: float, t1: float) -> bool:

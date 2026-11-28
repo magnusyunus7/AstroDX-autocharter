@@ -63,8 +63,11 @@ class Hand:
             return dt >= ONE_HAND_SEC - 1e-9
         return d <= max_move(dt)
 
-    def play(self, b_end: int, t: float, until: float) -> None:
-        self.button, self.last, self.busy_until = b_end, max(t, until), until
+    def play(self, b_end: int, t: float, until: float, rest: float | None = None) -> None:
+        """A note at t on b; the hand lets go at `until` (hold / slide end; t
+        for a tap) and is free again at `rest` (default: until)."""
+        self.button, self.last = b_end, max(t, until)
+        self.busy_until = max(self.last, rest if rest is not None else until)
 
 
 def forced_hand(t: float, prev_t: float | None, prev_hand: str | None) -> str | None:
