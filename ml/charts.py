@@ -58,7 +58,9 @@ def level_value(text: str) -> float | None:
 
 
 def title_key(title: str) -> str:
-    """The same song in different folders -> the same key (case, spaces, symbols ignored)."""
+    """The same song in different folders -> the same key (case, spaces, symbols
+    ignored; "千本桜 [DX]" is the same song as "千本桜": same audio, same split)."""
+    title = re.sub(r"\s*[\[\(（［]\s*DX\s*[\]\)）］]\s*$", "", title, flags=re.I)
     return "".join(ch for ch in title.casefold() if ch.isalnum())
 
 

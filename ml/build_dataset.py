@@ -172,6 +172,9 @@ def summarize(out: Path) -> dict:
         latest[r["id"]] = r
     songs = sorted(latest.values(), key=lambda r: (r["version"], r["song"]))
     good = [s for s in songs if s.get("ok")]
+    for s in good:                                     # keys / splits always from the current rules
+        s["title_key"] = charts.title_key(s["title"])
+        s["split"] = split_of(s["title_key"])
 
     # usual sync offset, from charts with a clear answer
     def clear(c):
